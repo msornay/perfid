@@ -1,7 +1,7 @@
 .PHONY: test lint deploy
 
 test:
-	python3 -m pytest -v test_gpg.py test_logger.py test_game_state.py test_message_router.py
+	python3 -m pytest -v test_gpg.py test_logger.py test_game_state.py test_message_router.py test_orders.py
 
 lint:
 	python3 -m ruff check .

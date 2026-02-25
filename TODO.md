@@ -26,10 +26,10 @@
 - [x] Key trust / import logic so agents can encrypt to GM and to each other
 
 ## 5. Agent I/O
-- [ ] Order submission: agent writes orders, encrypts with GM pub key, writes `.gpg`
-- [ ] Order decryption: GM decrypts all orders for adjudication
-- [ ] Order validation: check submitted orders are legal before adjudication
-- [ ] Private notes: agent encrypts with own pub key, reads back next turn
+- [x] Order submission: agent writes orders, encrypts with GM pub key, writes `.gpg`
+- [x] Order decryption: GM decrypts all orders for adjudication
+- [x] Order validation: check submitted orders are legal before adjudication
+- [x] Private notes: agent encrypts with own pub key, reads back next turn
 
 ## 6. Message routing (`message_router.py`)
 - [ ] Agent writes message encrypted with recipient's pub key → outbox
