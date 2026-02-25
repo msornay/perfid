@@ -56,6 +56,14 @@ class TestSystemPrompt:
         assert "supply center" in sp.lower() or "SC" in sp
         assert "18" in sp
 
+    def test_emphasizes_solo_victory(self):
+        sp = system_prompt("France")
+        sp_lower = sp.lower()
+        assert "solo victory" in sp_lower
+        assert "win" in sp_lower
+        assert "draw" in sp_lower  # mentions draw as failure
+        assert "stab" in sp_lower  # willingness to break alliances
+
     def test_contains_gpg_instructions(self):
         sp = system_prompt("Italy")
         assert "GPG" in sp or "gpg" in sp
@@ -203,6 +211,12 @@ class TestOrderPrompt:
         state["phase"] = Phase.SPRING_MOVEMENT.value
         op = order_prompt("Russia", state, game_dir)
         assert "SCs" in op
+
+    def test_emphasizes_winning(self, state, game_dir):
+        state["phase"] = Phase.SPRING_MOVEMENT.value
+        op = order_prompt("England", state, game_dir)
+        assert "18 SCs" in op
+        assert "solo victory" in op.lower()
 
 
 class TestRetreatPrompt:

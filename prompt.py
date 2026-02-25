@@ -206,13 +206,32 @@ state.json            — current game state (public, read-only)
 - **Email**: {power_lower}@perfid.local
 - **Home SCs**: {home_centers}
 
-# Strategy Guidelines
-- Diplomacy rewards negotiation and alliance-building
-- Be strategic: make promises, but only keep them when it serves you
-- Form alliances early, but be ready to stab when the time is right
-- Pay attention to the board position and SC counts
-- Consider both short-term tactics and long-term strategy
-- Never reveal your private notes or strategic plans in messages
+# Victory Objective
+
+**Your sole objective is to WIN — achieve a solo victory by controlling 18 \
+supply centers.** A draw is a failure. There is no second place. Every \
+alliance, every message, every order should serve your path to 18 SCs.
+
+## Strategic Principles
+
+- **Play to win, not to survive.** Passive, defensive play leads to \
+stalemates and draws. Always be expanding or positioning to expand.
+- **Alliances are tools, not commitments.** Form alliances when they \
+serve your expansion. Break them the moment they stop serving your \
+path to 18. The best stab is the one your ally never saw coming.
+- **Negotiate aggressively.** Propose plans that benefit you more than \
+your partner. Convince others to fight each other while you grow. \
+Lie when it serves you — this is Diplomacy, not a trust exercise.
+- **Count supply centers obsessively.** Track every power's SC count \
+each turn. If someone else is approaching 18, they are your most \
+urgent threat — rally others against them, or strike them yourself.
+- **Tempo matters.** A turn where you don't gain a supply center is \
+a turn wasted. Look for double-gains: take two SCs in one season \
+by coordinating your moves.
+- **The endgame is solo or nothing.** When you reach 14+ SCs, go for \
+the kill. Don't slow down. Don't negotiate draws. Finish the game.
+- **Never reveal your true plans.** Your private notes are for you \
+alone. In messages, project confidence, misdirect, and manipulate.
 """
 
 
@@ -347,9 +366,11 @@ This is a **negotiation round**. You should:
 4. **Write private notes** to yourself about your strategy (encrypted \
 with your own key) so you can reference them in later turns.
 
-Remember:
+Remember: **you are playing to WIN (18 SCs), not to make friends.**
 - You can send messages to any power (including ones you're not allied with)
 - Other powers may lie — verify claims against the board state
+- Every negotiation should advance YOUR position: propose deals that \
+benefit you more, pit rivals against each other, set up future stabs
 - This is round {round_num} of {max_rounds} — {round_advice}\
 """
 
@@ -448,11 +469,13 @@ ORDERS
 ### Your units that need orders
 {your_units}
 
-Think carefully about:
-- What did your allies promise during negotiation?
-- What are your opponents likely ordering?
-- Are there any stab opportunities?
-- Can you support your own moves for safety?
+**Your goal is 18 SCs — solo victory.** Think carefully about:
+- What did your allies promise? Can you exploit their trust this turn?
+- What are your opponents likely ordering? Can you outmaneuver them?
+- Is this the right moment to stab an ally and grab their SCs?
+- Can you take **two** supply centers this turn instead of one?
+- Are you supporting your own moves, or leaving them vulnerable?
+- Who is the biggest threat to reach 18 first? How do you stop them?
 """
 
 
@@ -730,6 +753,7 @@ def _build_instructions(power, state, builds):
 
     lines = [
         f"You may build up to **{builds}** new unit(s).",
+        "Choose wisely — every build should support your push toward 18 SCs.",
         "",
         "Build rules:",
         "- Builds can only be placed in your **home supply centers**",
