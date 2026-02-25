@@ -1,6 +1,10 @@
 # perfid TODO
 
-TEST MUST BE LAUNCHED IN DOCKER CONTAINERS
+- TEST MUST BE LAUNCHED IN DOCKER CONTAINERS
+- Agents must be motivated to solo WIN!
+- Agents must run jDip themsleves to check for their order validity and evaluate
+  their strategy sense of success through simulation. They must take under
+  consideration that communication with other player could be part of the strategy.
 
 ## 2. jDip setup (source of truth for all game state)
 - [ ] Download/vendor jDip headless JAR
