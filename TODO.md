@@ -39,13 +39,13 @@
 - [ ] Negotiation round management (N configurable rounds per negotiation phase)
 
 ## 7. Agent prompts (`prompt.py`)
-- [ ] System prompt: Diplomacy rules, GPG usage, file layout, phase instructions
-- [ ] Per-turn context: current state, inbox messages, previous results
-- [ ] Negotiation prompt: read inbox, compose & encrypt messages, strategy
-- [ ] Order prompt: analyze position, submit encrypted orders
-- [ ] Retreat prompt: choose retreat destinations or disband
-- [ ] Adjustment prompt: choose builds/disbands for winter
-- [ ] Bootstrap prompt: generate GPG key, publish public key
+- [x] System prompt: Diplomacy rules, GPG usage, file layout, phase instructions
+- [x] Per-turn context: current state, inbox messages, previous results
+- [x] Negotiation prompt: read inbox, compose & encrypt messages, strategy
+- [x] Order prompt: analyze position, submit encrypted orders
+- [x] Retreat prompt: choose retreat destinations or disband
+- [x] Adjustment prompt: choose builds/disbands for winter
+- [x] Bootstrap prompt: generate GPG key, publish public key
 
 ## 8. Bash CLI + game loop (`perfid`)
 - [ ] `perfid new` — create game dir, spin up 7 Docker sandboxes, generate GM keys
