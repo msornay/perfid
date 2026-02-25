@@ -2,11 +2,6 @@
 
 TEST MUST BE LAUNCHED IN DOCKER CONTAINERS
 
-## 1. Scaffolding
-- [x] Create repo, git init
-- [x] Directory layout: `perfid` CLI, `game_state.py`, `message_router.py`, `prompt.py`, `Makefile`, `CLAUDE.md`
-- [x] Write `TODO.md` (this file)
-
 ## 2. jDip setup (source of truth for all game state)
 - [ ] Download/vendor jDip headless JAR
 - [ ] Figure out jDip headless CLI: new game, export state, submit orders, adjudicate
