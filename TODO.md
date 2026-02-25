@@ -1,5 +1,7 @@
 # perfid TODO
 
+TEST MUST BE LAUNCHED IN DOCKER CONTAINERS
+
 ## 1. Scaffolding
 - [x] Create repo, git init
 - [x] Directory layout: `perfid` CLI, `game_state.py`, `message_router.py`, `prompt.py`, `Makefile`, `CLAUDE.md`
