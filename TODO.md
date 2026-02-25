@@ -18,12 +18,12 @@
 - [ ] DATC compliance smoke tests (bounce, cut support, convoy paradox)
 
 ## 4. GPG key bootstrap
-- [ ] GM key generation (host-side, private key outside shared workspace)
-- [ ] Agent key generation (inside Docker sandbox, private key stays in sandbox)
-- [ ] Public key publishing to `perfid-games/<game-id>/pubkeys/`
-- [ ] Encrypt helper: `gpg_encrypt(plaintext, recipient_pub_key) → ciphertext`
-- [ ] Decrypt helper: `gpg_decrypt(ciphertext, private_key) → plaintext`
-- [ ] Key trust / import logic so agents can encrypt to GM and to each other
+- [x] GM key generation (host-side, private key outside shared workspace)
+- [x] Agent key generation (inside Docker sandbox, private key stays in sandbox)
+- [x] Public key publishing to `perfid-games/<game-id>/pubkeys/`
+- [x] Encrypt helper: `gpg_encrypt(plaintext, recipient_pub_key) → ciphertext`
+- [x] Decrypt helper: `gpg_decrypt(ciphertext, private_key) → plaintext`
+- [x] Key trust / import logic so agents can encrypt to GM and to each other
 
 ## 5. Agent I/O
 - [ ] Order submission: agent writes orders, encrypts with GM pub key, writes `.gpg`
@@ -59,13 +59,14 @@
 - [ ] Game dir structure creation (`pubkeys/`, `orders/`, `messages/`, `results/`)
 
 ## 9. Logging
-- [ ] Append-only `log.jsonl` in game dir
-- [ ] Log events: phase start, orders submitted, adjudication results, messages sent
-- [ ] Include timestamps, phase labels, acting power
+- [x] Append-only `log.jsonl` in game dir
+- [x] Log events: phase start, orders submitted, adjudication results, messages sent
+- [x] Include timestamps, phase labels, acting power
 
 ## 10. Testing
 - [ ] Unit tests for game state (phase progression, SC update, win check)
-- [ ] Unit tests for message routing (encrypt/decrypt round-trip, inbox listing)
+- [x] Unit tests for GPG (encrypt/decrypt round-trip, key exchange, isolation)
+- [ ] Unit tests for message routing (inbox listing)
 - [ ] Integration test: full turn cycle (negotiate → order → adjudicate)
 - [ ] jDip adapter tests with known DATC cases
 
