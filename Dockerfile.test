@@ -1,0 +1,12 @@
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gnupg default-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pytest ruff
+
+WORKDIR /app
+COPY . .
+
+CMD ["sh", "-c", "python3 -m pytest -v test_gpg.py test_logger.py test_game_state.py test_message_router.py test_orders.py test_prompt.py test_jdip_adapter.py && bash test_perfid"]
