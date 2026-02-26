@@ -288,8 +288,8 @@ def adjustment_counts(state):
 def apply_orders(state, orders, game_dir=None):
     """Apply adjudicated orders to game state.
 
-    This is a placeholder that will delegate to jDip once vendored.
-    For now it accepts a results dict from the adjudicator.
+    Accepts a results dict, either from jDip (via jdip_adjudicate)
+    or from a manual adjudicator.
 
     Args:
         state: Current game state.
@@ -298,6 +298,7 @@ def apply_orders(state, orders, game_dir=None):
                 "resolved_units": {power: [unit_dicts]},
                 "dislodged": [{"power": str, "unit": unit_dict,
                                "retreats": [locations]}],
+                "sc_ownership": {sc: owner} (optional, from jDip),
             }
         game_dir: Optional game directory for saving state.
 
@@ -310,6 +311,8 @@ def apply_orders(state, orders, game_dir=None):
         state["dislodged"] = orders["dislodged"]
     else:
         state["dislodged"] = []
+    if "sc_ownership" in orders and orders["sc_ownership"]:
+        state["sc_ownership"] = orders["sc_ownership"]
 
     phase = Phase(state["phase"])
 
@@ -320,6 +323,42 @@ def apply_orders(state, orders, game_dir=None):
         winner = check_win(state)
         if winner:
             state["winner"] = winner
+
+    if game_dir:
+        save_state(state, game_dir)
+
+    return state
+
+
+def adjudicate(state, all_orders, game_dir=None):
+    """Adjudicate orders via jDip and apply results to state.
+
+    This is the primary entry point for DATC-compliant adjudication.
+
+    Args:
+        state: Current game state dict.
+        all_orders: Dict of power -> list of order strings.
+            e.g. {"France": ["A Paris - Burgundy", "F Brest H"]}
+        game_dir: Optional game directory for saving state.
+
+    Returns:
+        Updated state with adjudication applied and phase advanced.
+    """
+    import jdip_adapter
+
+    phase_label = state["phase"]
+    year = state["year"]
+
+    result = jdip_adapter.jdip_adjudicate(
+        phase_label, year,
+        state["units"],
+        state["sc_ownership"],
+        all_orders,
+    )
+
+    state = apply_orders(state, result, game_dir)
+    state = next_phase(state)
+    state = skip_retreat_if_empty(state)
 
     if game_dir:
         save_state(state, game_dir)

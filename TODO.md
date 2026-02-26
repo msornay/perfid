@@ -6,16 +6,16 @@
   consideration that communication with other player could be part of the strategy.
 
 ## 2. jDip setup (source of truth for all game state)
-- [ ] Download/vendor jDip headless JAR
-- [ ] Figure out jDip headless CLI: new game, export state, submit orders, adjudicate
-- [ ] `game_state.py` — thin adapter: call jDip, translate to/from our state.json
-- [ ] Create game via jDip (standard variant, starting positions come from jDip)
-- [ ] Export state from jDip → our JSON format for agents
-- [ ] Submit orders to jDip
-- [ ] Run adjudication via jDip, parse results
-- [ ] Phase progression wrapper (jDip handles the actual game logic)
+- [x] Download/vendor jDip headless JAR
+- [x] Figure out jDip headless CLI: new game, export state, submit orders, adjudicate
+- [x] `game_state.py` — thin adapter: call jDip, translate to/from our state.json
+- [x] Create game via jDip (standard variant, starting positions come from jDip)
+- [x] Export state from jDip → our JSON format for agents
+- [x] Submit orders to jDip
+- [x] Run adjudication via jDip, parse results
+- [x] Phase progression wrapper (jDip handles the actual game logic)
 - [ ] Win condition check (read SC counts from jDip state)
-- [ ] DATC compliance smoke tests (bounce, cut support, convoy paradox)
+- [x] DATC compliance smoke tests (bounce, cut support, convoy paradox)
 
 ## 4. GPG key bootstrap
 - [x] GM key generation (host-side, private key outside shared workspace)
@@ -68,7 +68,7 @@
 - [x] Unit tests for GPG (encrypt/decrypt round-trip, key exchange, isolation)
 - [x] Unit tests for message routing (inbox listing)
 - [ ] Integration test: full turn cycle (negotiate → order → adjudicate)
-- [ ] jDip adapter tests with known DATC cases
+- [x] jDip adapter tests with known DATC cases
 
 ## 11. Polish
 - [x] CLAUDE.md with dev instructions
