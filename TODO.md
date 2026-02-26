@@ -50,12 +50,12 @@
 ## 8. Bash CLI + game loop (`perfid`)
 - [x] `perfid new` — create game dir, spin up 7 Docker sandboxes, generate GM keys
 - [x] `perfid bootstrap` — run each agent to generate keys and publish pub keys
-- [ ] `perfid play` — main loop: negotiate → orders → adjudicate → repeat
+- [x] `perfid play` — main loop: negotiate → orders → adjudicate → repeat
 - [x] `perfid status` — print current standings (SCs per power, units, year/phase)
 - [x] `perfid destroy` — tear down sandboxes, optionally clean game dir
 - [ ] Parallel agent execution (7 agents via `claude -p` in Docker)
-- [ ] Phase dispatch: negotiation rounds vs. order submission vs. retreat vs. adjust
-- [ ] Error handling: agent timeout, malformed orders (default to Hold)
+- [x] Phase dispatch: negotiation rounds vs. order submission vs. retreat vs. adjust
+- [x] Error handling: agent timeout, malformed orders (default to Hold)
 - [x] Game dir structure creation (`pubkeys/`, `orders/`, `messages/`, `results/`)
 
 ## 9. Logging

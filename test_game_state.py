@@ -92,6 +92,59 @@ class TestNewGame:
         assert "updated_at" in state
 
 
+class TestNewGameJDip:
+    """Test that new_game can use jDip for starting positions."""
+
+    def test_jdip_starting_positions(self, tmp_path):
+        """new_game with use_jdip=True gets state from jDip."""
+        from jdip_adapter import is_available
+        if not is_available():
+            pytest.skip("jDip not available")
+        gd = tmp_path / "jdip-game"
+        state = new_game("jdip-test", gd, use_jdip=True)
+        assert state["year"] == 1901
+        assert len(state["units"]) == 7
+        total = sum(len(u) for u in state["units"].values())
+        assert total == 22
+        assert len(state["sc_ownership"]) == 22
+
+    def test_jdip_st_petersburg_normalized(self, tmp_path):
+        """jDip's St. Petersburg is normalized to perfid format."""
+        from jdip_adapter import is_available
+        if not is_available():
+            pytest.skip("jDip not available")
+        gd = tmp_path / "stp-game"
+        state = new_game("stp-test", gd, use_jdip=True)
+        ru_units = state["units"]["Russia"]
+        locs = [u["location"] for u in ru_units]
+        for loc in locs:
+            assert "St." not in loc  # No period
+        assert "St Petersburg" in state["sc_ownership"]
+
+    def test_fallback_without_jdip(self, tmp_path):
+        """new_game with use_jdip=False uses hardcoded positions."""
+        gd = tmp_path / "fallback-game"
+        state = new_game("fb-test", gd, use_jdip=False)
+        assert state["year"] == 1901
+        total = sum(len(u) for u in state["units"].values())
+        assert total == 22
+
+    def test_jdip_and_hardcoded_match(self, tmp_path):
+        """jDip and hardcoded starting positions are equivalent."""
+        from jdip_adapter import is_available
+        if not is_available():
+            pytest.skip("jDip not available")
+        gd1 = tmp_path / "jdip-compare"
+        gd2 = tmp_path / "hc-compare"
+        s1 = new_game("j-test", gd1, use_jdip=True)
+        s2 = new_game("h-test", gd2, use_jdip=False)
+        # Same number of units per power
+        for power in POWERS:
+            assert len(s1["units"][power]) == len(s2["units"][power])
+        # Same SC ownership count
+        assert len(s1["sc_ownership"]) == len(s2["sc_ownership"])
+
+
 class TestSaveLoad:
     def test_round_trip(self, state, game_dir):
         save_state(state, game_dir)

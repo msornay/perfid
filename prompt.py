@@ -190,6 +190,35 @@ gpg --armor --encrypt --trust-model always \\
     --output notes/{power}/<year>-<phase>.gpg
 ```
 
+# Strategy Simulation (jDip)
+
+You have access to jDip, a DATC-compliant Diplomacy adjudicator, to test \
+order combinations **before** committing. Use it to evaluate strategies:
+
+```python
+import json
+from jdip_adapter import simulate
+
+state = json.load(open("state.json"))
+result = simulate(state, {{
+    "{power}": ["A Paris - Burgundy", "F Brest - English Channel"],
+    "Germany": ["A Munich - Burgundy"],  # guess opponent orders
+}})
+
+# Check results
+for r in result["order_results"]:
+    print(r["order"], r["result"])
+
+# Per-power summary
+print(result["summary"]["{power}"])
+```
+
+The `simulate()` function runs adjudication **without modifying the game \
+state**, so you can safely test many combinations. Use it to:
+- Verify your orders will succeed against likely opponent moves
+- Test support configurations
+- Evaluate whether a stab will work before committing
+
 # File Layout
 ```
 pubkeys/              — public keys for all powers + GM

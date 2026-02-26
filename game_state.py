@@ -1,8 +1,8 @@
 """Diplomacy game state management.
 
 Handles game state representation, phase progression, supply center
-tracking, win condition detection, and save/load. Designed as a thin
-layer that will delegate adjudication to jDip once vendored.
+tracking, win condition detection, and save/load. Delegates
+adjudication to jDip for DATC-compliant game logic.
 """
 
 import json
@@ -121,12 +121,17 @@ ALL_SUPPLY_CENTERS = sorted(
 WIN_THRESHOLD = 18  # SCs needed to win
 
 
-def new_game(game_id, game_dir):
+def new_game(game_id, game_dir, use_jdip=True):
     """Create a new game with standard starting positions.
+
+    When use_jdip is True (default), starting positions and supply
+    center ownership come from jDip — the DATC-compliant source of
+    truth. Falls back to hardcoded positions if jDip is unavailable.
 
     Args:
         game_id: Unique identifier for this game.
         game_dir: Path to the game directory (perfid-games/<game-id>/).
+        use_jdip: If True, get starting state from jDip.
 
     Returns:
         The initial game state dict.
@@ -134,17 +139,37 @@ def new_game(game_id, game_dir):
     game_dir = Path(game_dir)
     game_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build initial SC ownership from home centers
-    sc_ownership = {}
-    for power, centers in HOME_CENTERS.items():
-        for sc in centers:
-            sc_ownership[sc] = power
+    units = None
+    sc_ownership = None
+
+    if use_jdip:
+        try:
+            import jdip_adapter
+            if jdip_adapter.is_available():
+                jdip_state = jdip_adapter.jdip_init()
+                # Normalize jDip location names to perfid format
+                units = jdip_adapter._units_from_jdip(
+                    jdip_state["units"]
+                )
+                sc_ownership = jdip_adapter._sc_from_jdip(
+                    jdip_state["sc_ownership"]
+                )
+        except (ImportError, RuntimeError):
+            pass  # Fall back to hardcoded positions
+
+    if units is None:
+        units = deepcopy(STARTING_UNITS)
+    if sc_ownership is None:
+        sc_ownership = {}
+        for power, centers in HOME_CENTERS.items():
+            for sc in centers:
+                sc_ownership[sc] = power
 
     state = {
         "game_id": game_id,
         "year": 1901,
         "phase": Phase.SPRING_DIPLOMACY.value,
-        "units": deepcopy(STARTING_UNITS),
+        "units": units,
         "sc_ownership": sc_ownership,
         "eliminated": [],
         "winner": None,

@@ -71,6 +71,9 @@ assert_exits 0 "defines NEGOTIATION_ROUNDS" grep -q 'NEGOTIATION_ROUNDS=' "$PERF
 assert_exits 0 "uses game_state module" grep -q 'game_state' "$PERFID"
 assert_exits 0 "uses message_router module" grep -q 'message_router' "$PERFID"
 assert_exits 0 "uses format_status" grep -q 'format_status' "$PERFID"
+assert_exits 0 "play uses adjudicate" grep -q 'adjudicate' "$PERFID"
+assert_exits 0 "play uses jDip" grep -q 'jdip\|jDip\|adjudicate' "$PERFID"
+assert_exits 0 "play uses logger" grep -q 'GameLogger\|logger' "$PERFID"
 
 # ===== E2E tests (temporary game dir, no Docker) =====
 
