@@ -11,6 +11,8 @@ NEGOTIATION_ROUNDS="${PERFID_NEGOTIATION_ROUNDS:-3}"
 
 POWERS=(Austria England France Germany Italy Russia Turkey)
 
+lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 usage() {
   cat <<'USAGE'
 Usage: perfid <command> <game-id>
@@ -96,7 +98,7 @@ KEYEOF
 
     # Create 7 Docker sandboxes
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-${power,,}"
+      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Creating sandbox: $sandbox_name"
       docker sandbox create --name "$sandbox_name" claude "$gd" || {
         echo "Warning: failed to create sandbox for $power" >&2
@@ -115,7 +117,7 @@ KEYEOF
 
     # Import GM public key and generate agent keys
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-${power,,}"
+      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Bootstrapping $power ($sandbox_name)..."
 
       # Generate bootstrap prompt
@@ -206,7 +208,7 @@ print('$power' in info['eliminated'])
 ")
               [[ "$is_eliminated" == "True" ]] && continue
 
-              sandbox_name="perfid-${game_id}-${power,,}"
+              sandbox_name="perfid-${game_id}-$(lowercase "$power")"
               prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -251,7 +253,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-${power,,}"
+            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -313,7 +315,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-${power,,}"
+            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -384,7 +386,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-${power,,}"
+            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -488,7 +490,7 @@ print(format_status(state))
 
     # Tear down Docker sandboxes
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-${power,,}"
+      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Removing sandbox: $sandbox_name"
       docker sandbox rm "$sandbox_name" 2>/dev/null || true
     done
