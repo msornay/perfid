@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# perfid — Orchestrate 7 Claude agents playing Diplomacy with GPG encryption.
+#
+# Game data lives in $PERFID_GAMES_DIR/<game-id>/ (default: perfid-games/).
+# Each agent runs in a Docker sandbox with its own GPG keyring.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GAMES_DIR="${PERFID_GAMES_DIR:-perfid-games}"
+NEGOTIATION_ROUNDS="${PERFID_NEGOTIATION_ROUNDS:-3}"
+
+POWERS=(Austria England France Germany Italy Russia Turkey)
+
+usage() {
+  cat <<'USAGE'
+Usage: perfid <command> <game-id>
+
+Commands:
+  new       <game-id>     Create game, 7 agent sandboxes, and GM keys
+  bootstrap <game-id>     Agents generate GPG keys and publish pub keys
+  play      <game-id>     Main loop: negotiate → orders → adjudicate
+  status    <game-id>     Print current standings
+  destroy   <game-id>     Tear down agent sandboxes
+USAGE
+  exit 1
+}
+
+[[ $# -eq 0 ]] && usage
+cmd=$1; shift
+
+require_game_id() {
+  if [[ $# -lt 1 ]] || [[ -z "$1" ]]; then
+    echo "Usage: perfid $cmd <game-id>" >&2
+    exit 1
+  fi
+  echo "$1"
+}
+
+game_dir() {
+  echo "$GAMES_DIR/$1"
+}
+
+require_game_exists() {
+  local gd
+  gd=$(game_dir "$1")
+  if [[ ! -f "$gd/state.json" ]]; then
+    echo "Error: game '$1' not found at $gd" >&2
+    exit 1
+  fi
+  echo "$gd"
+}
+
+case "$cmd" in
+  new)
+    game_id=$(require_game_id "$@")
+    gd=$(game_dir "$game_id")
+
+    if [[ -d "$gd" ]]; then
+      echo "Error: game directory $gd already exists." >&2
+      exit 1
+    fi
+
+    echo "Creating game '$game_id'..."
+
+    # Initialize game state and message directories
+    python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from game_state import new_game
+from message_router import init_message_dirs
+
+state = new_game('$game_id', '$gd')
+init_message_dirs('$gd', state['units'].keys())
+print(f\"Game state initialized: {state['year']} {state['phase']}\")
+"
+
+    # Create pubkeys, orders, and notes directories
+    mkdir -p "$gd/pubkeys" "$gd/orders" "$gd/notes"
+
+    # Generate GM GPG key
+    gm_gpg="$gd/gm-gpg"
+    mkdir -p "$gm_gpg"
+    chmod 700 "$gm_gpg"
+    gpg --batch --homedir "$gm_gpg" --gen-key <<KEYEOF
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: GM
+Name-Email: gm@perfid.local
+Expire-Date: 0
+%no-protection
+%commit
+KEYEOF
+    gpg --homedir "$gm_gpg" --armor --export gm@perfid.local \
+      > "$gd/pubkeys/GM.asc"
+    echo "GM GPG key generated."
+
+    # Create 7 Docker sandboxes
+    for power in "${POWERS[@]}"; do
+      sandbox_name="perfid-${game_id}-${power,,}"
+      echo "  Creating sandbox: $sandbox_name"
+      docker sandbox create --name "$sandbox_name" claude "$gd" || {
+        echo "Warning: failed to create sandbox for $power" >&2
+      }
+    done
+
+    echo "Game '$game_id' created at $gd"
+    echo "Next: perfid bootstrap $game_id"
+    ;;
+
+  bootstrap)
+    game_id=$(require_game_id "$@")
+    gd=$(require_game_exists "$game_id")
+
+    echo "Bootstrapping agents for game '$game_id'..."
+
+    # Import GM public key and generate agent keys
+    for power in "${POWERS[@]}"; do
+      sandbox_name="perfid-${game_id}-${power,,}"
+      echo "  Bootstrapping $power ($sandbox_name)..."
+
+      # Generate bootstrap prompt
+      prompt=$(python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from prompt import bootstrap_prompt
+print(bootstrap_prompt('$power'))
+")
+
+      docker sandbox run "$sandbox_name" -- -p "$prompt" || {
+        echo "Warning: bootstrap failed for $power" >&2
+      }
+    done
+
+    echo "Bootstrap complete. Agents should have published keys to $gd/pubkeys/"
+    echo "Next: perfid play $game_id"
+    ;;
+
+  play)
+    game_id=$(require_game_id "$@")
+    gd=$(require_game_exists "$game_id")
+
+    echo "Starting game loop for '$game_id'..."
+    echo "(Not yet implemented — requires jDip for adjudication)"
+    exit 1
+    ;;
+
+  status)
+    game_id=$(require_game_id "$@")
+    gd=$(require_game_exists "$game_id")
+
+    python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from game_state import load_state, format_status
+state = load_state('$gd')
+print(format_status(state))
+"
+    ;;
+
+  destroy)
+    game_id=$(require_game_id "$@")
+    gd=$(game_dir "$game_id")
+
+    echo "Destroying game '$game_id'..."
+
+    # Tear down Docker sandboxes
+    for power in "${POWERS[@]}"; do
+      sandbox_name="perfid-${game_id}-${power,,}"
+      echo "  Removing sandbox: $sandbox_name"
+      docker sandbox rm "$sandbox_name" 2>/dev/null || true
+    done
+
+    # Optionally remove game directory
+    if [[ -d "$gd" ]]; then
+      printf "Delete game directory %s? [y/N] " "$gd"
+      read -r answer
+      if [[ "$answer" =~ ^[Yy]$ ]]; then
+        rm -rf "$gd"
+        echo "Game directory deleted."
+      else
+        echo "Game directory kept at $gd"
+      fi
+    fi
+
+    echo "Game '$game_id' destroyed."
+    ;;
+
+  *)
+    usage
+    ;;
+esac

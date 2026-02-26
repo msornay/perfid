@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Sanity tests for the perfid CLI script.
+# Tests argument parsing, usage output, status command, and script structure.
+# Does NOT require Docker — only validates the script and local game operations.
+set -euo pipefail
+
+PERFID="$(cd "$(dirname "$0")" && pwd)/perfid"
+pass=0
+fail=0
+
+assert_exits() {
+    local expected=$1 desc=$2; shift 2
+    local actual=0
+    "$@" >/dev/null 2>&1 || actual=$?
+    if [[ $actual -eq $expected ]]; then
+        pass=$((pass + 1)); echo "ok   - $desc"
+    else
+        fail=$((fail + 1)); echo "FAIL - $desc (expected exit $expected, got $actual)"
+    fi
+}
+
+assert_output_matches() {
+    local pattern=$1 desc=$2; shift 2
+    local output
+    output=$("$@" 2>&1) || true
+    if echo "$output" | grep -qE "$pattern"; then
+        pass=$((pass + 1)); echo "ok   - $desc"
+    else
+        fail=$((fail + 1)); echo "FAIL - $desc (output missing /$pattern/)"
+    fi
+}
+
+# -- Script structure --
+assert_exits 0 "script passes bash -n syntax check" bash -n "$PERFID"
+
+# -- No args --
+assert_exits 1 "no args exits 1" "$PERFID"
+assert_output_matches "^Usage:" "no args shows usage" "$PERFID"
+
+# -- Unknown command --
+assert_exits 1 "unknown command exits 1" "$PERFID" badcmd
+assert_output_matches "^Usage:" "unknown command shows usage" "$PERFID" badcmd
+
+# -- Command without game-id --
+assert_exits 1 "new without game-id exits 1" "$PERFID" new
+assert_output_matches "perfid new" "new without game-id shows usage" "$PERFID" new
+
+assert_exits 1 "status without game-id exits 1" "$PERFID" status
+assert_output_matches "perfid status" "status without game-id shows usage" "$PERFID" status
+
+assert_exits 1 "destroy without game-id exits 1" "$PERFID" destroy
+assert_output_matches "perfid destroy" "destroy without game-id shows usage" "$PERFID" destroy
+
+assert_exits 1 "bootstrap without game-id exits 1" "$PERFID" bootstrap
+assert_output_matches "perfid bootstrap" "bootstrap without game-id shows usage" "$PERFID" bootstrap
+
+assert_exits 1 "play without game-id exits 1" "$PERFID" play
+assert_output_matches "perfid play" "play without game-id shows usage" "$PERFID" play
+
+# -- Usage text lists all commands --
+assert_output_matches "new" "usage mentions new" "$PERFID"
+assert_output_matches "bootstrap" "usage mentions bootstrap" "$PERFID"
+assert_output_matches "play" "usage mentions play" "$PERFID"
+assert_output_matches "status" "usage mentions status" "$PERFID"
+assert_output_matches "destroy" "usage mentions destroy" "$PERFID"
+
+# -- Script structure checks --
+assert_exits 0 "defines POWERS array" grep -q 'POWERS=(' "$PERFID"
+assert_exits 0 "defines GAMES_DIR" grep -q 'GAMES_DIR=' "$PERFID"
+assert_exits 0 "defines NEGOTIATION_ROUNDS" grep -q 'NEGOTIATION_ROUNDS=' "$PERFID"
+assert_exits 0 "uses game_state module" grep -q 'game_state' "$PERFID"
+assert_exits 0 "uses message_router module" grep -q 'message_router' "$PERFID"
+assert_exits 0 "uses format_status" grep -q 'format_status' "$PERFID"
+
+# ===== E2E tests (temporary game dir, no Docker) =====
+
+TEST_WS=$(mktemp -d)
+cleanup() {
+    rm -rf "$TEST_WS"
+}
+trap cleanup EXIT
+
+# -- new: creates game directory and state --
+export PERFID_GAMES_DIR="$TEST_WS/games"
+"$PERFID" new test-001 >/dev/null 2>&1 || true
+if [[ -f "$TEST_WS/games/test-001/state.json" ]]; then
+    pass=$((pass + 1)); echo "ok   - new: creates state.json"
+else
+    fail=$((fail + 1)); echo "FAIL - new: creates state.json"
+fi
+
+if [[ -d "$TEST_WS/games/test-001/messages/inbox" ]]; then
+    pass=$((pass + 1)); echo "ok   - new: creates message directories"
+else
+    fail=$((fail + 1)); echo "FAIL - new: creates message directories"
+fi
+
+if [[ -d "$TEST_WS/games/test-001/pubkeys" ]]; then
+    pass=$((pass + 1)); echo "ok   - new: creates pubkeys directory"
+else
+    fail=$((fail + 1)); echo "FAIL - new: creates pubkeys directory"
+fi
+
+if [[ -d "$TEST_WS/games/test-001/orders" ]]; then
+    pass=$((pass + 1)); echo "ok   - new: creates orders directory"
+else
+    fail=$((fail + 1)); echo "FAIL - new: creates orders directory"
+fi
+
+if [[ -d "$TEST_WS/games/test-001/notes" ]]; then
+    pass=$((pass + 1)); echo "ok   - new: creates notes directory"
+else
+    fail=$((fail + 1)); echo "FAIL - new: creates notes directory"
+fi
+
+# -- new: rejects duplicate game --
+output=$("$PERFID" new test-001 2>&1) && {
+    fail=$((fail + 1)); echo "FAIL - new: rejects duplicate game (should have exited non-zero)"
+} || {
+    if echo "$output" | grep -q "already exists"; then
+        pass=$((pass + 1)); echo "ok   - new: rejects duplicate game"
+    else
+        fail=$((fail + 1)); echo "FAIL - new: rejects duplicate game (wrong error message)"
+    fi
+}
+
+# -- status: prints game info --
+output=$("$PERFID" status test-001 2>&1)
+if echo "$output" | grep -qE "test-001"; then
+    pass=$((pass + 1)); echo "ok   - status: shows game ID"
+else
+    fail=$((fail + 1)); echo "FAIL - status: shows game ID"
+fi
+
+if echo "$output" | grep -qE "1901"; then
+    pass=$((pass + 1)); echo "ok   - status: shows year 1901"
+else
+    fail=$((fail + 1)); echo "FAIL - status: shows year 1901"
+fi
+
+if echo "$output" | grep -qE "Spring Diplomacy"; then
+    pass=$((pass + 1)); echo "ok   - status: shows initial phase"
+else
+    fail=$((fail + 1)); echo "FAIL - status: shows initial phase"
+fi
+
+for power in Austria England France Germany Italy Russia Turkey; do
+    if echo "$output" | grep -qE "$power"; then
+        pass=$((pass + 1)); echo "ok   - status: shows $power"
+    else
+        fail=$((fail + 1)); echo "FAIL - status: shows $power"
+    fi
+done
+
+if echo "$output" | grep -qE "34"; then
+    pass=$((pass + 1)); echo "ok   - status: shows total SCs"
+else
+    fail=$((fail + 1)); echo "FAIL - status: shows total SCs"
+fi
+
+# -- status: non-existent game exits 1 --
+assert_exits 1 "status: non-existent game exits 1" "$PERFID" status no-such-game
+assert_output_matches "not found" "status: non-existent game shows error" "$PERFID" status no-such-game
+
+echo ""
+echo "$((pass + fail)) tests, $pass passed, $fail failed"
+[[ $fail -eq 0 ]]

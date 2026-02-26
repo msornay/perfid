@@ -48,15 +48,15 @@
 - [x] Bootstrap prompt: generate GPG key, publish public key
 
 ## 8. Bash CLI + game loop (`perfid`)
-- [ ] `perfid new` — create game dir, spin up 7 Docker sandboxes, generate GM keys
-- [ ] `perfid bootstrap` — run each agent to generate keys and publish pub keys
+- [x] `perfid new` — create game dir, spin up 7 Docker sandboxes, generate GM keys
+- [x] `perfid bootstrap` — run each agent to generate keys and publish pub keys
 - [ ] `perfid play` — main loop: negotiate → orders → adjudicate → repeat
-- [ ] `perfid status` — print current standings (SCs per power, units, year/phase)
-- [ ] `perfid destroy` — tear down sandboxes, optionally clean game dir
+- [x] `perfid status` — print current standings (SCs per power, units, year/phase)
+- [x] `perfid destroy` — tear down sandboxes, optionally clean game dir
 - [ ] Parallel agent execution (7 agents via `claude -p` in Docker)
 - [ ] Phase dispatch: negotiation rounds vs. order submission vs. retreat vs. adjust
 - [ ] Error handling: agent timeout, malformed orders (default to Hold)
-- [ ] Game dir structure creation (`pubkeys/`, `orders/`, `messages/`, `results/`)
+- [x] Game dir structure creation (`pubkeys/`, `orders/`, `messages/`, `results/`)
 
 ## 9. Logging
 - [x] Append-only `log.jsonl` in game dir
@@ -64,13 +64,13 @@
 - [x] Include timestamps, phase labels, acting power
 
 ## 10. Testing
-- [ ] Unit tests for game state (phase progression, SC update, win check)
+- [x] Unit tests for game state (phase progression, SC update, win check)
 - [x] Unit tests for GPG (encrypt/decrypt round-trip, key exchange, isolation)
-- [ ] Unit tests for message routing (inbox listing)
+- [x] Unit tests for message routing (inbox listing)
 - [ ] Integration test: full turn cycle (negotiate → order → adjudicate)
 - [ ] jDip adapter tests with known DATC cases
 
 ## 11. Polish
-- [ ] CLAUDE.md with dev instructions
-- [ ] Makefile targets: `new`, `bootstrap`, `play`, `status`, `destroy`, `test`
+- [x] CLAUDE.md with dev instructions
+- [x] Makefile targets: `new`, `bootstrap`, `play`, `status`, `destroy`, `test`
 - [ ] README.md with project overview (if requested)
