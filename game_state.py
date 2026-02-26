@@ -334,6 +334,7 @@ def adjudicate(state, all_orders, game_dir=None):
     """Adjudicate orders via jDip and apply results to state.
 
     This is the primary entry point for DATC-compliant adjudication.
+    Uses jDip's SC ownership and game_over flag for win detection.
 
     Args:
         state: Current game state dict.
@@ -357,6 +358,14 @@ def adjudicate(state, all_orders, game_dir=None):
     )
 
     state = apply_orders(state, result, game_dir)
+
+    # Check win using SC counts from jDip's updated ownership
+    if result.get("game_over"):
+        winner = check_win(state)
+        if winner:
+            state["winner"] = winner
+    state = check_elimination(state)
+
     state = next_phase(state)
     state = skip_retreat_if_empty(state)
 

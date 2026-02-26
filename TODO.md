@@ -14,7 +14,7 @@
 - [x] Submit orders to jDip
 - [x] Run adjudication via jDip, parse results
 - [x] Phase progression wrapper (jDip handles the actual game logic)
-- [ ] Win condition check (read SC counts from jDip state)
+- [x] Win condition check (read SC counts from jDip state)
 - [x] DATC compliance smoke tests (bounce, cut support, convoy paradox)
 
 ## 4. GPG key bootstrap

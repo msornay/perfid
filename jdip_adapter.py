@@ -233,6 +233,76 @@ def jdip_adjudicate(phase_label, year, units, sc_ownership, orders):
     return result
 
 
+def simulate(state, orders):
+    """Simulate order adjudication without modifying game state.
+
+    Intended for agents to test order combinations and evaluate
+    strategies before committing. Returns the full jDip result
+    without advancing the game.
+
+    Args:
+        state: Current game state dict (not modified).
+        orders: Dict of power -> list of order strings.
+
+    Returns:
+        Dict with jDip adjudication results (same as
+        jdip_adjudicate output), plus a "summary" key with
+        per-power unit counts and SC changes.
+    """
+    phase_label = state["phase"]
+    year = state["year"]
+
+    result = jdip_adjudicate(
+        phase_label, year,
+        state["units"],
+        state["sc_ownership"],
+        orders,
+    )
+
+    # Add summary for quick evaluation
+    summary = {}
+    for power in state["units"]:
+        old_units = len(state["units"].get(power, []))
+        new_units = len(
+            result.get("resolved_units", {}).get(power, [])
+        )
+        old_scs = sum(
+            1 for v in state["sc_ownership"].values()
+            if v == power
+        )
+        new_scs = sum(
+            1 for v in result.get("sc_ownership", {}).values()
+            if v == power
+        )
+        summary[power] = {
+            "units_before": old_units,
+            "units_after": new_units,
+            "scs_before": old_scs,
+            "scs_after": new_scs,
+        }
+    result["summary"] = summary
+
+    return result
+
+
+def order_results_for(result, power):
+    """Extract order results for a specific power.
+
+    Args:
+        result: Dict returned by jdip_adjudicate or simulate.
+        power: Power name (e.g. "France").
+
+    Returns:
+        List of dicts with keys: order, result, message.
+        Only includes orders belonging to the given power.
+    """
+    prefix = f"{power}: "
+    return [
+        r for r in result.get("order_results", [])
+        if r.get("order", "").startswith(prefix)
+    ]
+
+
 def is_available():
     """Check if jDip is available (JAR and Java exist)."""
     if not _JDIP_JAR.exists():
