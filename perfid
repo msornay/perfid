@@ -13,6 +13,30 @@ POWERS=(Austria England France Germany Italy Russia Turkey)
 
 lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Wait for background agent PIDs and report failures.
+# Usage: wait_agents "${pids[@]}" -- "${powers[@]}"
+wait_agents() {
+  local pids=() powers=() sep=false
+  for arg in "$@"; do
+    if [[ "$arg" == "--" ]]; then
+      sep=true; continue
+    fi
+    if $sep; then
+      powers+=("$arg")
+    else
+      pids+=("$arg")
+    fi
+  done
+  local i failures=0
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" 2>/dev/null || {
+      echo "    Warning: ${powers[$i]} failed" >&2
+      failures=$((failures + 1))
+    }
+  done
+  return 0
+}
+
 usage() {
   cat <<'USAGE'
 Usage: perfid <command> <game-id>
@@ -115,7 +139,9 @@ KEYEOF
 
     echo "Bootstrapping agents for game '$game_id'..."
 
-    # Import GM public key and generate agent keys
+    # Import GM public key and generate agent keys (all 7 in parallel)
+    agent_pids=()
+    agent_powers=()
     for power in "${POWERS[@]}"; do
       sandbox_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Bootstrapping $power ($sandbox_name)..."
@@ -128,10 +154,11 @@ from prompt import bootstrap_prompt
 print(bootstrap_prompt('$power'))
 ")
 
-      docker sandbox run "$sandbox_name" -- -p "$prompt" || {
-        echo "Warning: bootstrap failed for $power" >&2
-      }
+      docker sandbox run "$sandbox_name" -- -p "$prompt" &
+      agent_pids+=($!)
+      agent_powers+=("$power")
     done
+    wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
 
     echo "Bootstrap complete. Agents should have published keys to $gd/pubkeys/"
     echo "Next: perfid play $game_id"
@@ -196,9 +223,11 @@ logger.phase_start($year, season, phase_type)
 
       case "$phase" in
         "Spring Diplomacy"|"Fall Diplomacy")
-          # Negotiation rounds
+          # Negotiation rounds — agents run in parallel within each round
           for round_num in $(seq 1 "$NEGOTIATION_ROUNDS"); do
             echo "  Negotiation round $round_num/$NEGOTIATION_ROUNDS"
+            agent_pids=()
+            agent_powers=()
             for power in "${POWERS[@]}"; do
               # Skip eliminated powers
               is_eliminated=$(echo "$phase_info" | python3 -c "
@@ -218,10 +247,11 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd', $round_num, $NEGOTIATION_ROUNDS))
 ")
               echo "    $power negotiating..."
-              docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null || {
-                echo "    Warning: $power negotiation failed" >&2
-              }
+              docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+              agent_pids+=($!)
+              agent_powers+=("$power")
             done
+            wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
 
             # Route messages after each round
             python3 -c "
@@ -244,7 +274,9 @@ save_state(state, '$gd')
           ;;
 
         "Spring Movement"|"Fall Movement")
-          # Collect orders from agents
+          # Collect orders from agents (all in parallel)
+          agent_pids=()
+          agent_powers=()
           for power in "${POWERS[@]}"; do
             is_eliminated=$(echo "$phase_info" | python3 -c "
 import sys,json
@@ -263,10 +295,11 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting orders..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null || {
-              echo "  Warning: $power order submission failed" >&2
-            }
+            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            agent_pids+=($!)
+            agent_powers+=("$power")
           done
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
 
           # Collect, validate, and adjudicate via jDip
           echo "  Adjudicating via jDip..."
@@ -306,7 +339,9 @@ print(f\"  Phase advanced to: {state['year']} {state['phase']}\")
           ;;
 
         "Spring Retreat"|"Fall Retreat")
-          # Collect retreat orders from agents with dislodged units
+          # Collect retreat orders from agents with dislodged units (all in parallel)
+          agent_pids=()
+          agent_powers=()
           for power in "${POWERS[@]}"; do
             is_eliminated=$(echo "$phase_info" | python3 -c "
 import sys,json
@@ -325,10 +360,11 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting retreats..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null || {
-              echo "  Warning: $power retreat failed" >&2
-            }
+            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            agent_pids+=($!)
+            agent_powers+=("$power")
           done
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
 
           # Apply retreats and advance phase
           python3 -c "
@@ -377,7 +413,9 @@ print(f\"  Phase advanced to: {state['year']} {state['phase']}\")
           ;;
 
         "Winter Adjustment")
-          # Collect adjustment orders from agents
+          # Collect adjustment orders from agents (all in parallel)
+          agent_pids=()
+          agent_powers=()
           for power in "${POWERS[@]}"; do
             is_eliminated=$(echo "$phase_info" | python3 -c "
 import sys,json
@@ -396,10 +434,11 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting adjustments..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null || {
-              echo "  Warning: $power adjustment failed" >&2
-            }
+            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            agent_pids+=($!)
+            agent_powers+=("$power")
           done
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
 
           # Apply adjustments and advance to next year
           python3 -c "

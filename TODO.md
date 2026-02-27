@@ -32,11 +32,11 @@
 - [x] Private notes: agent encrypts with own pub key, reads back next turn
 
 ## 6. Message routing (`message_router.py`)
-- [ ] Agent writes message encrypted with recipient's pub key → outbox
-- [ ] Router moves message from outbox to recipient's inbox path
-- [ ] Message naming: `<sender>-to-<recipient>-<phase>-r<round>-<seq>.gpg`
-- [ ] List inbox for a given agent/phase/round
-- [ ] Negotiation round management (N configurable rounds per negotiation phase)
+- [x] Agent writes message encrypted with recipient's pub key → outbox
+- [x] Router moves message from outbox to recipient's inbox path
+- [x] Message naming: `<sender>-to-<recipient>-<phase>-r<round>-<seq>.gpg`
+- [x] List inbox for a given agent/phase/round
+- [x] Negotiation round management (N configurable rounds per negotiation phase)
 
 ## 7. Agent prompts (`prompt.py`)
 - [x] System prompt: Diplomacy rules, GPG usage, file layout, phase instructions
@@ -53,7 +53,7 @@
 - [x] `perfid play` — main loop: negotiate → orders → adjudicate → repeat
 - [x] `perfid status` — print current standings (SCs per power, units, year/phase)
 - [x] `perfid destroy` — tear down sandboxes, optionally clean game dir
-- [ ] Parallel agent execution (7 agents via `claude -p` in Docker)
+- [x] Parallel agent execution (7 agents via `claude -p` in Docker)
 - [x] Phase dispatch: negotiation rounds vs. order submission vs. retreat vs. adjust
 - [x] Error handling: agent timeout, malformed orders (default to Hold)
 - [x] Game dir structure creation (`pubkeys/`, `orders/`, `messages/`, `results/`)
