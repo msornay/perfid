@@ -1,7 +1,7 @@
 """Agent prompt generation for perfid Diplomacy games.
 
 Builds system prompts and per-turn context for each agent. The prompts
-instruct the Claude agent (running in a Docker sandbox) on how to play
+instruct the Claude agent (running in a Docker container) on how to play
 Diplomacy, use GPG encryption, and interact with the game filesystem.
 
 Prompt types:
@@ -101,7 +101,7 @@ def _format_dislodged(dislodged, power):
 SYSTEM_PROMPT = """\
 You are a Diplomacy AI agent playing as {power} in a 7-player standard \
 Diplomacy game. You are one of 7 independent AI agents, each running in \
-an isolated Docker sandbox.
+an isolated Docker container.
 
 # Diplomacy Rules Summary
 
@@ -145,7 +145,7 @@ Builds can only be placed in your **home supply centers** that are \
 # Communication Protocol
 
 All inter-agent communication uses GPG encryption. Your private key \
-is in your sandbox and NEVER leaves it.
+is in your container and NEVER leaves it.
 
 ## Sending messages
 1. Compose your message as plaintext

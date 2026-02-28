@@ -5,7 +5,7 @@
 ## Project structure
 
 ```
-perfid                  # Bash CLI — orchestrates game loop, Docker sandboxes, parallel agents
+perfid                  # Bash CLI — orchestrates game loop, Docker containers, parallel agents
 game_state.py           # State init, save/load, starting positions, phase progression
 message_router.py       # Route encrypted messages between agents
 prompt.py               # System prompts + per-turn context for each agent
@@ -17,16 +17,16 @@ Runtime game data lives outside this repo in `perfid-games/<game-id>/`.
 
 ## Isolation model
 
-Each agent runs in a Docker sandbox with its own GPG key pair. Private keys stay inside the sandbox (never in the shared workspace). Public keys are published to `perfid-games/<game-id>/pubkeys/`. All inter-agent communication is GPG-encrypted — agents can see every file but can only decrypt what's addressed to them.
+Each agent runs in a Docker container with its own GPG key pair. Private keys stay inside the container (never in the shared workspace). Public keys are published to `perfid-games/<game-id>/pubkeys/`. All inter-agent communication is GPG-encrypted — agents can see every file but can only decrypt what's addressed to them.
 
 ## Game flow
 
 ```
-perfid new         → create game dir, 7 Docker sandboxes, GM keys
+perfid new         → create game dir, 7 Docker containers, GM keys
 perfid bootstrap   → agents generate key pairs, publish pub keys
 perfid play        → main loop: negotiate → orders → adjudicate → check win
 perfid status      → print standings
-perfid destroy     → tear down sandboxes
+perfid destroy     → tear down containers
 ```
 
 ## Dev commands
@@ -44,4 +44,4 @@ make status        # perfid status
 - Python 3 for game logic
 - jDip (Java) for DATC-compliant adjudication
 - GPG for encryption
-- Docker for agent sandboxes (claude -p)
+- Docker for agent containers (claude -p)

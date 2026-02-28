@@ -2,12 +2,13 @@
 # perfid — Orchestrate 7 Claude agents playing Diplomacy with GPG encryption.
 #
 # Game data lives in $PERFID_GAMES_DIR/<game-id>/ (default: perfid-games/).
-# Each agent runs in a Docker sandbox with its own GPG keyring.
+# Each agent runs in a Docker container with its own GPG keyring.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GAMES_DIR="${PERFID_GAMES_DIR:-perfid-games}"
 NEGOTIATION_ROUNDS="${PERFID_NEGOTIATION_ROUNDS:-3}"
+PLAYER_IMAGE="${PERFID_PLAYER_IMAGE:-perfid-player}"
 
 POWERS=(Austria England France Germany Italy Russia Turkey)
 
@@ -42,11 +43,11 @@ usage() {
 Usage: perfid <command> <game-id>
 
 Commands:
-  new       <game-id>     Create game, 7 agent sandboxes, and GM keys
+  new       <game-id>     Create game, 7 agent containers, and GM keys
   bootstrap <game-id>     Agents generate GPG keys and publish pub keys
   play      <game-id>     Main loop: negotiate → orders → adjudicate
   status    <game-id>     Print current standings
-  destroy   <game-id>     Tear down agent sandboxes
+  destroy   <game-id>     Tear down agent containers
 USAGE
   exit 1
 }
@@ -120,12 +121,23 @@ KEYEOF
       > "$gd/pubkeys/GM.asc"
     echo "GM GPG key generated."
 
-    # Create 7 Docker sandboxes
+    # Build player image if needed
+    if ! docker image inspect "$PLAYER_IMAGE" >/dev/null 2>&1; then
+      echo "Building player image..."
+      docker build -f "$SCRIPT_DIR/Dockerfile.player" -t "$PLAYER_IMAGE" "$SCRIPT_DIR"
+    fi
+
+    # Create 7 Docker containers
+    abs_gd="$(cd "$gd" && pwd)"
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
-      echo "  Creating sandbox: $sandbox_name"
-      docker sandbox create "$sandbox_name" claude "$gd" || {
-        echo "Warning: failed to create sandbox for $power" >&2
+      ctr_name="perfid-${game_id}-$(lowercase "$power")"
+      echo "  Creating container: $ctr_name"
+      docker run -d --name "$ctr_name" \
+        -e ANTHROPIC_API_KEY \
+        -v "$abs_gd:/game" \
+        -w /game \
+        "$PLAYER_IMAGE" >/dev/null || {
+        echo "Warning: failed to create container for $power" >&2
       }
     done
 
@@ -143,8 +155,8 @@ KEYEOF
     agent_pids=()
     agent_powers=()
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
-      echo "  Bootstrapping $power ($sandbox_name)..."
+      ctr_name="perfid-${game_id}-$(lowercase "$power")"
+      echo "  Bootstrapping $power ($ctr_name)..."
 
       # Generate bootstrap prompt
       prompt=$(python3 -c "
@@ -154,7 +166,7 @@ from prompt import bootstrap_prompt
 print(bootstrap_prompt('$power'))
 ")
 
-      docker sandbox run "$sandbox_name" -- -p "$prompt" &
+      docker exec "$ctr_name" claude -p "$prompt" &
       agent_pids+=($!)
       agent_powers+=("$power")
     done
@@ -237,7 +249,7 @@ print('$power' in info['eliminated'])
 ")
               [[ "$is_eliminated" == "True" ]] && continue
 
-              sandbox_name="perfid-${game_id}-$(lowercase "$power")"
+              ctr_name="perfid-${game_id}-$(lowercase "$power")"
               prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -247,7 +259,7 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd', $round_num, $NEGOTIATION_ROUNDS))
 ")
               echo "    $power negotiating..."
-              docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+              docker exec "$ctr_name" claude -p "$prompt" 2>/dev/null &
               agent_pids+=($!)
               agent_powers+=("$power")
             done
@@ -285,7 +297,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
+            ctr_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -295,7 +307,7 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting orders..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            docker exec "$ctr_name" claude -p "$prompt" 2>/dev/null &
             agent_pids+=($!)
             agent_powers+=("$power")
           done
@@ -350,7 +362,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
+            ctr_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -360,7 +372,7 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting retreats..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            docker exec "$ctr_name" claude -p "$prompt" 2>/dev/null &
             agent_pids+=($!)
             agent_powers+=("$power")
           done
@@ -424,7 +436,7 @@ print('$power' in info['eliminated'])
 ")
             [[ "$is_eliminated" == "True" ]] && continue
 
-            sandbox_name="perfid-${game_id}-$(lowercase "$power")"
+            ctr_name="perfid-${game_id}-$(lowercase "$power")"
             prompt=$(python3 -c "
 import sys
 sys.path.insert(0, '$SCRIPT_DIR')
@@ -434,7 +446,7 @@ state = load_state('$gd')
 print(turn_context('$power', state, '$gd'))
 ")
             echo "  $power submitting adjustments..."
-            docker sandbox run "$sandbox_name" -- -p "$prompt" 2>/dev/null &
+            docker exec "$ctr_name" claude -p "$prompt" 2>/dev/null &
             agent_pids+=($!)
             agent_powers+=("$power")
           done
@@ -527,11 +539,11 @@ print(format_status(state))
 
     echo "Destroying game '$game_id'..."
 
-    # Tear down Docker sandboxes
+    # Tear down Docker containers
     for power in "${POWERS[@]}"; do
-      sandbox_name="perfid-${game_id}-$(lowercase "$power")"
-      echo "  Removing sandbox: $sandbox_name"
-      docker sandbox rm "$sandbox_name" 2>/dev/null || true
+      ctr_name="perfid-${game_id}-$(lowercase "$power")"
+      echo "  Removing container: $ctr_name"
+      docker rm -f "$ctr_name" 2>/dev/null || true
     done
 
     # Optionally remove game directory

@@ -232,10 +232,10 @@ def setup_gm_keys(game_dir):
 
 
 def setup_agent_keys(gnupghome, power):
-    """Generate keys for an agent (called inside the agent's sandbox).
+    """Generate keys for an agent (called inside the agent's container).
 
     Args:
-        gnupghome: Agent's private GPG home (inside sandbox).
+        gnupghome: Agent's private GPG home (inside container).
         power: Diplomacy power name (e.g. "England").
 
     Returns:
