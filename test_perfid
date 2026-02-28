@@ -165,6 +165,10 @@ fi
 assert_exits 1 "status: non-existent game exits 1" "$PERFID" status no-such-game
 assert_output_matches "not found" "status: non-existent game shows error" "$PERFID" status no-such-game
 
+# -- destroy: non-existent game exits 1 --
+assert_exits 1 "destroy: non-existent game exits 1" "$PERFID" destroy no-such-game
+assert_output_matches "not found" "destroy: non-existent game shows error" "$PERFID" destroy no-such-game
+
 echo ""
 echo "$((pass + fail)) tests, $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

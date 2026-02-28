@@ -523,7 +523,7 @@ print(format_status(state))
 
   destroy)
     game_id=$(require_game_id "$@")
-    gd=$(game_dir "$game_id")
+    gd=$(require_game_exists "$game_id")
 
     echo "Destroying game '$game_id'..."
 
