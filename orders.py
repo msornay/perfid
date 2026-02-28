@@ -18,7 +18,6 @@ Directory layout inside a game dir:
 """
 
 import json
-import os
 import re
 from pathlib import Path
 

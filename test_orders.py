@@ -2,9 +2,8 @@
 
 import json
 import pytest
-from pathlib import Path
 
-from game_state import Phase, POWERS, new_game
+from game_state import Phase, new_game
 import gpg as gpg_mod
 from orders import (
     PROVINCES,
@@ -409,7 +408,7 @@ class TestDefaultOrders:
 
 class TestSubmitAndDecrypt:
     def test_submit_creates_gpg_file(self, game_dir, gpg_setup):
-        state = new_game("test-001", game_dir)
+        new_game("test-001", game_dir)
         path = submit_orders(
             game_dir, "France", 1901, "Spring Movement",
             ["A Paris - Burgundy", "F Brest - Mid-Atlantic Ocean"],
@@ -419,7 +418,7 @@ class TestSubmitAndDecrypt:
         assert path.suffix == ".gpg"
 
     def test_decrypt_recovers_orders(self, game_dir, gpg_setup):
-        state = new_game("test-001", game_dir)
+        new_game("test-001", game_dir)
         orders = ["A Paris - Burgundy", "A Marseilles - Spain",
                    "F Brest - Mid-Atlantic Ocean"]
         submit_orders(
@@ -435,7 +434,7 @@ class TestSubmitAndDecrypt:
         assert result["orders"] == orders
 
     def test_decrypt_writes_json(self, game_dir, gpg_setup):
-        state = new_game("test-001", game_dir)
+        new_game("test-001", game_dir)
         submit_orders(
             game_dir, "France", 1901, "Spring Movement",
             ["A Paris H"], gpg_setup["agent_home"],

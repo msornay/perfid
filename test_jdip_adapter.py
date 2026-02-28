@@ -797,7 +797,7 @@ class TestGameStateIntegration:
 
     def test_adjudicate_preserves_game_over(self):
         """adjudicate() uses jDip game_over for win detection."""
-        from game_state import adjudicate, check_win, new_game
+        from game_state import check_win, new_game
 
         state = new_game("test-win", "/tmp/test-jdip-win")
         assert state["winner"] is None

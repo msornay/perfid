@@ -6,7 +6,6 @@ adjudication to jDip for DATC-compliant game logic.
 """
 
 import json
-import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from enum import Enum

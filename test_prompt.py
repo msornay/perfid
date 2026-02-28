@@ -1,7 +1,5 @@
 """Tests for prompt.py — agent prompt generation for perfid."""
 
-import json
-import os
 
 import pytest
 
@@ -10,8 +8,6 @@ from game_state import (
     POWERS,
     Phase,
     new_game,
-    next_phase,
-    state_for_power,
 )
 from message_router import init_message_dirs, send_message
 from prompt import (

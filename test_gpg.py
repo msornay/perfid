@@ -1,7 +1,6 @@
 """Tests for gpg.py — GPG helper functions for perfid."""
 
 import os
-import tempfile
 
 import pytest
 

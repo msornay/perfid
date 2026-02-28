@@ -7,7 +7,6 @@ GM and agent keyrings stay separate.
 
 import os
 import subprocess
-import tempfile
 
 
 # 7 Diplomacy powers
@@ -190,7 +189,7 @@ def decrypt(gnupghome, ciphertext):
 
 def encrypt_to_file(gnupghome, plaintext, recipient_email, output_path):
     """Encrypt plaintext and write ciphertext to a file."""
-    result = _run_gpg(
+    _run_gpg(
         ["--armor", "--encrypt", "--trust-model", "always",
          "--recipient", recipient_email,
          "--output", output_path],

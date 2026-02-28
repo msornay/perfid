@@ -2,7 +2,6 @@
 
 import json
 import pytest
-from pathlib import Path
 
 from game_state import (
     ALL_SUPPLY_CENTERS,
@@ -156,7 +155,6 @@ class TestSaveLoad:
         assert loaded["sc_ownership"] == state["sc_ownership"]
 
     def test_updates_timestamp(self, state, game_dir):
-        old_ts = state["updated_at"]
         save_state(state, game_dir)
         loaded = load_state(game_dir)
         # updated_at should be refreshed (may be same if fast)

@@ -13,7 +13,6 @@ Prompt types:
   - adjustment_prompt: choose builds/disbands for winter
 """
 
-import json
 
 from game_state import (
     HOME_CENTERS,
@@ -63,10 +62,6 @@ def _format_sc_ownership(state):
             lines.append(f"  {power}: 0 SCs (eliminated)")
         else:
             lines.append(f"  {power}: {n} SCs — {', '.join(owned)}")
-    neutral = sorted(
-        sc for sc in state["sc_ownership"]
-        if state["sc_ownership"][sc] not in POWERS
-    )
     unowned = 34 - sum(counts.values())
     if unowned > 0:
         lines.append(f"  Neutral: {unowned} SCs")
