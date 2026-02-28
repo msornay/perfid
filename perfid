@@ -124,7 +124,7 @@ KEYEOF
     for power in "${POWERS[@]}"; do
       sandbox_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Creating sandbox: $sandbox_name"
-      docker sandbox create --name "$sandbox_name" claude "$gd" || {
+      docker sandbox create "$sandbox_name" claude "$gd" || {
         echo "Warning: failed to create sandbox for $power" >&2
       }
     done
