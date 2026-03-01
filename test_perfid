@@ -57,6 +57,13 @@ assert_output_matches "perfid bootstrap" "bootstrap without game-id shows usage"
 assert_exits 1 "play without game-id exits 1" "$PERFID" play
 assert_output_matches "perfid play" "play without game-id shows usage" "$PERFID" play
 
+# -- Invalid game-id --
+assert_exits 1 "new rejects game-id with spaces" "$PERFID" new "game with spaces"
+assert_output_matches "invalid game-id" "new shows error for game-id with spaces" "$PERFID" new "game with spaces"
+assert_exits 1 "new rejects game-id with slash" "$PERFID" new "game/bad"
+assert_exits 1 "new rejects game-id starting with dot" "$PERFID" new ".hidden"
+assert_exits 1 "status rejects game-id with spaces" "$PERFID" status "game with spaces"
+
 # -- Usage text lists all commands --
 assert_output_matches "new" "usage mentions new" "$PERFID"
 assert_output_matches "bootstrap" "usage mentions bootstrap" "$PERFID"

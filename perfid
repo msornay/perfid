@@ -60,6 +60,10 @@ require_game_id() {
     echo "Usage: perfid $cmd <game-id>" >&2
     exit 1
   fi
+  if [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "Error: invalid game-id '$1'. Use only letters, digits, hyphens, underscores, and dots." >&2
+    exit 1
+  fi
   echo "$1"
 }
 
