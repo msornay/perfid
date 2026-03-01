@@ -129,6 +129,7 @@ KEYEOF
 
     # Create 7 Docker containers
     abs_gd="$(cd "$gd" && pwd)"
+    container_failures=0
     for power in "${POWERS[@]}"; do
       ctr_name="perfid-${game_id}-$(lowercase "$power")"
       echo "  Creating container: $ctr_name"
@@ -138,8 +139,14 @@ KEYEOF
         -w /game \
         "$PLAYER_IMAGE" >/dev/null || {
         echo "Warning: failed to create container for $power" >&2
+        container_failures=$((container_failures + 1))
       }
     done
+
+    if [[ $container_failures -gt 0 ]]; then
+      echo "Error: $container_failures of ${#POWERS[@]} containers failed to create." >&2
+      exit 1
+    fi
 
     echo "Game '$game_id' created at $gd"
     echo "Next: perfid bootstrap $game_id"
