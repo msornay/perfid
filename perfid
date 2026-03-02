@@ -35,7 +35,7 @@ wait_agents() {
       failures=$((failures + 1))
     }
   done
-  return 0
+  return "$failures"
 }
 
 usage() {
@@ -181,7 +181,16 @@ print(bootstrap_prompt('$power'))
       agent_pids+=($!)
       agent_powers+=("$power")
     done
-    wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
+    bootstrap_failures=0
+    wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}" || bootstrap_failures=$?
+
+    if [[ $bootstrap_failures -eq ${#POWERS[@]} ]]; then
+      echo "Error: all ${#POWERS[@]} agents failed to bootstrap." >&2
+      exit 1
+    fi
+    if [[ $bootstrap_failures -gt 0 ]]; then
+      echo "Warning: $bootstrap_failures of ${#POWERS[@]} agents failed to bootstrap." >&2
+    fi
 
     echo "Bootstrap complete. Agents should have published keys to $gd/pubkeys/"
     echo "Next: perfid play $game_id"
@@ -274,7 +283,7 @@ print(turn_context('$power', state, '$gd', $round_num, $NEGOTIATION_ROUNDS))
               agent_pids+=($!)
               agent_powers+=("$power")
             done
-            wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
+            wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}" || true
 
             # Route messages after each round
             python3 -c "
@@ -322,7 +331,7 @@ print(turn_context('$power', state, '$gd'))
             agent_pids+=($!)
             agent_powers+=("$power")
           done
-          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}" || true
 
           # Collect, validate, and adjudicate via jDip
           echo "  Adjudicating via jDip..."
@@ -387,7 +396,7 @@ print(turn_context('$power', state, '$gd'))
             agent_pids+=($!)
             agent_powers+=("$power")
           done
-          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}" || true
 
           # Apply retreats and advance phase
           python3 -c "
@@ -461,7 +470,7 @@ print(turn_context('$power', state, '$gd'))
             agent_pids+=($!)
             agent_powers+=("$power")
           done
-          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}"
+          wait_agents "${agent_pids[@]}" -- "${agent_powers[@]}" || true
 
           # Apply adjustments and advance to next year
           python3 -c "

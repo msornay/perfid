@@ -176,6 +176,60 @@ assert_output_matches "not found" "status: non-existent game shows error" "$PERF
 assert_exits 1 "destroy: non-existent game exits 1" "$PERFID" destroy no-such-game
 assert_output_matches "not found" "destroy: non-existent game shows error" "$PERFID" destroy no-such-game
 
+# ===== wait_agents tests (extracted function) =====
+
+# Extract wait_agents function from perfid and test it directly
+WAIT_AGENTS_SCRIPT="$TEST_WS/wait_agents_test.bash"
+sed -n '/^wait_agents()/,/^}/p' "$PERFID" > "$WAIT_AGENTS_SCRIPT"
+
+# Test: all processes succeed → returns 0
+cat > "$TEST_WS/test_wait_ok.bash" <<'SCRIPT'
+set -euo pipefail
+source "$1"
+true & p1=$!
+true & p2=$!
+wait_agents "$p1" "$p2" -- "A" "B"
+SCRIPT
+rc=0; bash "$TEST_WS/test_wait_ok.bash" "$WAIT_AGENTS_SCRIPT" 2>/dev/null || rc=$?
+if [[ $rc -eq 0 ]]; then
+    pass=$((pass + 1)); echo "ok   - wait_agents: returns 0 when all succeed"
+else
+    fail=$((fail + 1)); echo "FAIL - wait_agents: returns 0 when all succeed (got $rc)"
+fi
+
+# Test: all processes fail → returns count of failures
+cat > "$TEST_WS/test_wait_allfail.bash" <<'SCRIPT'
+source "$1"
+false & p1=$!
+false & p2=$!
+false & p3=$!
+wait_agents "$p1" "$p2" "$p3" -- "A" "B" "C"
+SCRIPT
+rc=0; bash "$TEST_WS/test_wait_allfail.bash" "$WAIT_AGENTS_SCRIPT" 2>/dev/null || rc=$?
+if [[ $rc -eq 3 ]]; then
+    pass=$((pass + 1)); echo "ok   - wait_agents: returns 3 when all 3 fail"
+else
+    fail=$((fail + 1)); echo "FAIL - wait_agents: returns 3 when all 3 fail (got $rc)"
+fi
+
+# Test: some processes fail → returns count of failures
+cat > "$TEST_WS/test_wait_partial.bash" <<'SCRIPT'
+source "$1"
+true & p1=$!
+false & p2=$!
+true & p3=$!
+wait_agents "$p1" "$p2" "$p3" -- "A" "B" "C"
+SCRIPT
+rc=0; bash "$TEST_WS/test_wait_partial.bash" "$WAIT_AGENTS_SCRIPT" 2>/dev/null || rc=$?
+if [[ $rc -eq 1 ]]; then
+    pass=$((pass + 1)); echo "ok   - wait_agents: returns 1 when 1 of 3 fails"
+else
+    fail=$((fail + 1)); echo "FAIL - wait_agents: returns 1 when 1 of 3 fails (got $rc)"
+fi
+
+# Test: bootstrap error message when all agents fail
+assert_output_matches "all.*agents failed" "bootstrap: error message mentions all agents" grep "all.*agents failed" "$PERFID"
+
 echo ""
 echo "$((pass + fail)) tests, $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
