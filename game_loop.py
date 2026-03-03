@@ -110,6 +110,42 @@ def _dropbox_path(power):
     return f"/tmp/orders-{power.lower()}"
 
 
+# --- Phase checkpoint (resume after Ctrl+C) ---
+
+
+def _save_checkpoint(game_dir, year, phase, round_num, power_order,
+                     next_index):
+    """Save in-phase progress so the game can resume after interruption."""
+    path = os.path.join(game_dir, ".phase-progress.json")
+    tmp = path + ".tmp"
+    data = {"year": year, "phase": phase, "round": round_num,
+            "power_order": power_order, "next_index": next_index}
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _load_checkpoint(game_dir, year, phase):
+    """Load checkpoint if it matches the current year/phase."""
+    path = os.path.join(game_dir, ".phase-progress.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        cp = json.load(f)
+    if cp.get("year") == year and cp.get("phase") == phase:
+        return cp
+    return None
+
+
+def _clear_checkpoint(game_dir):
+    """Remove the checkpoint file after a phase completes."""
+    path = os.path.join(game_dir, ".phase-progress.json")
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 # --- GPG isolation ---
 
 
@@ -453,7 +489,17 @@ def _movement_phase(ctx, state):
     except OSError:
         pass  # may fail in test environment
 
-    for round_num in range(1, MAX_ROUNDS + 1):
+    cp = _load_checkpoint(game_dir, year, phase)
+    start_round = cp["round"] if cp else 1
+    start_index = cp["next_index"] if cp else 0
+    saved_order = cp["power_order"] if cp else None
+
+    if cp:
+        print(f"  Resuming from round {cp['round']}, "
+              f"power {cp['next_index']}/{len(cp['power_order'])} "
+              f"({cp['power_order'][cp['next_index']]})...")
+
+    for round_num in range(start_round, MAX_ROUNDS + 1):
         can_submit = round_num > MIN_NEGOTIATION_ROUNDS
 
         # Create per-power dropboxes when orders are allowed
@@ -469,11 +515,18 @@ def _movement_phase(ctx, state):
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
 
-        # Shuffle power order for fairness
-        order = list(active)
-        random.shuffle(order)
+        # Use saved order for resumed round, otherwise shuffle
+        if saved_order and round_num == start_round:
+            order = saved_order
+        else:
+            order = list(active)
+            random.shuffle(order)
+            start_index = 0
 
-        for power in order:
+        for i, power in enumerate(order):
+            if i < start_index:
+                continue
+
             print(f"  {power}'s turn (round {round_num})...")
 
             setup_turn_gpg(ctx, power)
@@ -505,6 +558,11 @@ def _movement_phase(ctx, state):
             finally:
                 cleanup_turn_gpg(ctx, power)
 
+            _save_checkpoint(game_dir, year, phase,
+                             round_num, order, i + 1)
+
+        saved_order = None
+
         # Check if all have submitted (only after negotiation rounds)
         if can_submit:
             all_submitted = all(
@@ -518,6 +576,8 @@ def _movement_phase(ctx, state):
         # max_rounds reached — log and continue
         print(f"  Round limit reached ({MAX_ROUNDS}). "
               f"Using default orders for non-submitters.")
+
+    _clear_checkpoint(game_dir)
 
     # Adjudicate
     adjudicate_movement(ctx, state)
@@ -540,11 +600,21 @@ def _retreat_phase(ctx, state):
 
     active = _active_powers(state)
 
-    for power in active:
-        has_dislodged = any(
-            d["power"] == power for d in dislodged
-        )
-        if not has_dislodged:
+    powers_to_act = [
+        p for p in active
+        if any(d["power"] == p for d in dislodged)
+    ]
+
+    cp = _load_checkpoint(game_dir, year, phase)
+    start_index = cp["next_index"] if cp else 0
+
+    if cp:
+        print(f"  Resuming from power {cp['next_index']}"
+              f"/{len(powers_to_act)} "
+              f"({powers_to_act[cp['next_index']]})...")
+
+    for i, power in enumerate(powers_to_act):
+        if i < start_index:
             continue
 
         print(f"  {power} submitting retreats...")
@@ -574,6 +644,11 @@ def _retreat_phase(ctx, state):
         finally:
             cleanup_turn_gpg(ctx, power)
 
+        _save_checkpoint(game_dir, year, phase,
+                         1, powers_to_act, i + 1)
+
+    _clear_checkpoint(game_dir)
+
     # Apply retreats and advance phase
     apply_retreats_and_advance(ctx, state)
 
@@ -594,7 +669,17 @@ def _winter_phase(ctx, state):
 
     active = _active_powers(state)
 
-    for power in active:
+    cp = _load_checkpoint(game_dir, year, phase)
+    start_index = cp["next_index"] if cp else 0
+
+    if cp:
+        print(f"  Resuming from power {cp['next_index']}"
+              f"/{len(active)} ({active[cp['next_index']]})...")
+
+    for i, power in enumerate(active):
+        if i < start_index:
+            continue
+
         print(f"  {power} submitting adjustments...")
 
         dropbox = _dropbox_path(power)
@@ -621,6 +706,10 @@ def _winter_phase(ctx, state):
             )
         finally:
             cleanup_turn_gpg(ctx, power)
+
+        _save_checkpoint(game_dir, year, phase, 1, active, i + 1)
+
+    _clear_checkpoint(game_dir)
 
     # Apply adjustments and advance
     apply_adjustments_and_advance(ctx, state)
@@ -674,7 +763,8 @@ def adjudicate_movement(ctx, state):
 
     _log(logger, "adjudication", year=year, phase=phase,
          order_results=order_results,
-         dislodged=state.get("dislodged", []))
+         dislodged=state.get("dislodged", []),
+         resolved_units=state["units"])
 
     print(f"  Phase advanced to: {state['year']} {state['phase']}")
 
@@ -725,6 +815,9 @@ def apply_retreats_and_advance(ctx, state):
             })
 
     state = apply_retreats(state, retreat_orders, game_dir)
+    _log(logger, "retreats_applied", year=year, phase=phase,
+         retreat_orders=retreat_orders,
+         units=state["units"])
     state = next_phase(state)
     save_state(state, game_dir)
     print(f"  Phase advanced to: {state['year']} {state['phase']}")
@@ -786,6 +879,9 @@ def apply_adjustments_and_advance(ctx, state):
             adjustments[power] = actions
 
     state = apply_adjustments(state, adjustments, game_dir)
+    _log(logger, "adjustments_applied", year=year, phase=phase,
+         adjustments=adjustments,
+         units=state["units"])
     state = next_phase(state)
     save_state(state, game_dir)
 

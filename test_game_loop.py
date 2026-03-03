@@ -463,6 +463,149 @@ class TestMovementPhase:
         assert mock_setup.call_count == game_loop.MAX_ROUNDS * 7
 
 
+# --- Tests: Checkpoint helpers ---
+
+
+class TestCheckpointHelpers:
+    def test_save_and_load(self, game_dir):
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 3,
+            ["England", "France", "Germany"], 2,
+        )
+        cp = game_loop._load_checkpoint(game_dir, 1901, "Spring")
+        assert cp is not None
+        assert cp["year"] == 1901
+        assert cp["phase"] == "Spring"
+        assert cp["round"] == 3
+        assert cp["power_order"] == ["England", "France", "Germany"]
+        assert cp["next_index"] == 2
+
+    def test_load_wrong_year(self, game_dir):
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 1, ["England"], 0,
+        )
+        assert game_loop._load_checkpoint(game_dir, 1902, "Spring") is None
+
+    def test_load_wrong_phase(self, game_dir):
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 1, ["England"], 0,
+        )
+        assert game_loop._load_checkpoint(game_dir, 1901, "Fall") is None
+
+    def test_load_no_file(self, game_dir):
+        assert game_loop._load_checkpoint(game_dir, 1901, "Spring") is None
+
+    def test_clear(self, game_dir):
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 1, ["England"], 0,
+        )
+        path = os.path.join(game_dir, ".phase-progress.json")
+        assert os.path.exists(path)
+        game_loop._clear_checkpoint(game_dir)
+        assert not os.path.exists(path)
+
+    def test_clear_no_file(self, game_dir):
+        # Should not raise
+        game_loop._clear_checkpoint(game_dir)
+
+    def test_atomic_write(self, game_dir):
+        """Tmp file should not linger after save."""
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 1, ["England"], 0,
+        )
+        tmp = os.path.join(game_dir, ".phase-progress.json.tmp")
+        assert not os.path.exists(tmp)
+
+
+# --- Tests: Movement phase resume ---
+
+
+class TestMovementPhaseResume:
+    @patch("game_loop.adjudicate_movement")
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_resumes_from_checkpoint(
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
+        ctx, state, game_dir
+    ):
+        """After a checkpoint, powers before next_index are skipped."""
+        mock_agent.return_value = True
+
+        # Pre-submit orders so phase ends after round 4
+        enc_home = str(os.path.join(game_dir, "enc-home"))
+        gpg.init_gnupghome(enc_home)
+        gpg.import_all_pubkeys(enc_home, game_dir)
+        for power in POWERS:
+            submit_orders(
+                game_dir, power, 1901, "Spring",
+                [f"A {power} H"], enc_home,
+            )
+
+        # Plant a checkpoint mid-round-4: 3 powers already done
+        fixed_order = list(POWERS)
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Spring", 4, fixed_order, 3,
+        )
+
+        game_loop._movement_phase(ctx, state)
+
+        # Only powers 3..6 (4 powers) should have had turns in round 4
+        setup_powers = [c.args[1] for c in mock_setup.call_args_list]
+        assert len(setup_powers) == 4
+        assert setup_powers == fixed_order[3:]
+
+    @patch("game_loop.adjudicate_movement")
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_checkpoint_cleared_after_phase(
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
+        ctx, state, game_dir
+    ):
+        mock_agent.return_value = True
+        enc_home = str(os.path.join(game_dir, "enc-home"))
+        gpg.init_gnupghome(enc_home)
+        gpg.import_all_pubkeys(enc_home, game_dir)
+        for power in POWERS:
+            submit_orders(
+                game_dir, power, 1901, "Spring",
+                [f"A {power} H"], enc_home,
+            )
+
+        game_loop._movement_phase(ctx, state)
+        path = os.path.join(game_dir, ".phase-progress.json")
+        assert not os.path.exists(path)
+
+    @patch("game_loop.adjudicate_movement")
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_stale_checkpoint_ignored(
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
+        ctx, state, game_dir
+    ):
+        """Checkpoint from a different phase is ignored."""
+        mock_agent.return_value = True
+        enc_home = str(os.path.join(game_dir, "enc-home"))
+        gpg.init_gnupghome(enc_home)
+        gpg.import_all_pubkeys(enc_home, game_dir)
+        for power in POWERS:
+            submit_orders(
+                game_dir, power, 1901, "Spring",
+                [f"A {power} H"], enc_home,
+            )
+
+        # Plant checkpoint for a different phase
+        game_loop._save_checkpoint(
+            game_dir, 1901, "Fall", 2, list(POWERS), 5,
+        )
+
+        game_loop._movement_phase(ctx, state)
+        # All 7 powers should play in each round (no skipping)
+        assert mock_setup.call_count >= 7
+
+
 # --- Tests: Retreat phase ---
 
 
@@ -493,6 +636,68 @@ class TestRetreatPhase:
         assert "Austria" in setup_powers
         assert len(setup_powers) == 1
 
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_logs_retreat_orders(
+        self, mock_cleanup, mock_setup, mock_agent,
+        ctx, game_dir
+    ):
+        state = load_state(game_dir)
+        state["phase"] = Phase.SPRING_RETREAT.value
+        state["dislodged"] = [
+            {
+                "power": "Austria",
+                "unit": {"type": "Army", "location": "Vienna"},
+                "retreats": ["Bohemia", "Tyrolia"],
+            }
+        ]
+        save_state(state, game_dir)
+
+        mock_agent.return_value = True
+        game_loop._retreat_phase(ctx, state)
+
+        log_path = os.path.join(game_dir, "log.jsonl")
+        with open(log_path) as f:
+            events = [json.loads(l) for l in f if l.strip()]
+        retreat_events = [
+            e for e in events if e.get("event") == "retreats_applied"
+        ]
+        assert len(retreat_events) >= 1
+        assert "retreat_orders" in retreat_events[0]
+        assert "units" in retreat_events[0]
+
+    @patch("game_loop.apply_retreats_and_advance")
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_retreat_resumes_from_checkpoint(
+        self, mock_cleanup, mock_setup, mock_agent, mock_advance,
+        ctx, game_dir
+    ):
+        state = load_state(game_dir)
+        state["phase"] = Phase.SPRING_RETREAT.value
+        state["dislodged"] = [
+            {"power": "Austria", "unit": {"type": "Army", "location": "Vienna"},
+             "retreats": ["Bohemia"]},
+            {"power": "France", "unit": {"type": "Army", "location": "Paris"},
+             "retreats": ["Picardy"]},
+        ]
+        save_state(state, game_dir)
+
+        mock_agent.return_value = True
+
+        # Checkpoint: Austria already done, resume at France
+        game_loop._save_checkpoint(
+            game_dir, 1901, Phase.SPRING_RETREAT.value,
+            1, ["Austria", "France"], 1,
+        )
+
+        game_loop._retreat_phase(ctx, state)
+
+        setup_powers = [c.args[1] for c in mock_setup.call_args_list]
+        assert setup_powers == ["France"]
+
 
 # --- Tests: Winter phase ---
 
@@ -517,6 +722,58 @@ class TestWinterPhase:
         assert len(setup_powers) == 6  # 7 - 1 eliminated
         assert "Turkey" not in setup_powers
 
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_logs_adjustments(
+        self, mock_cleanup, mock_setup, mock_agent,
+        ctx, game_dir
+    ):
+        state = load_state(game_dir)
+        state["phase"] = Phase.WINTER_ADJUSTMENT.value
+        save_state(state, game_dir)
+
+        mock_agent.return_value = True
+        game_loop._winter_phase(ctx, state)
+
+        log_path = os.path.join(game_dir, "log.jsonl")
+        with open(log_path) as f:
+            events = [json.loads(l) for l in f if l.strip()]
+        adj_events = [
+            e for e in events
+            if e.get("event") == "adjustments_applied"
+        ]
+        assert len(adj_events) >= 1
+        assert "adjustments" in adj_events[0]
+        assert "units" in adj_events[0]
+
+    @patch("game_loop.apply_adjustments_and_advance")
+    @patch("game_loop.run_agent")
+    @patch("game_loop.setup_turn_gpg")
+    @patch("game_loop.cleanup_turn_gpg")
+    def test_winter_resumes_from_checkpoint(
+        self, mock_cleanup, mock_setup, mock_agent, mock_advance,
+        ctx, game_dir
+    ):
+        state = load_state(game_dir)
+        state["phase"] = Phase.WINTER_ADJUSTMENT.value
+        save_state(state, game_dir)
+
+        mock_agent.return_value = True
+
+        active = game_loop._active_powers(state)
+        # Checkpoint: first 4 powers done
+        game_loop._save_checkpoint(
+            game_dir, 1901, Phase.WINTER_ADJUSTMENT.value,
+            1, active, 4,
+        )
+
+        game_loop._winter_phase(ctx, state)
+
+        setup_powers = [c.args[1] for c in mock_setup.call_args_list]
+        assert len(setup_powers) == 3  # 7 - 4 skipped
+        assert setup_powers == active[4:]
+
 
 # --- Tests: Adjudication ---
 
@@ -539,6 +796,33 @@ class TestAdjudicateMovement:
         }
         game_loop.adjudicate_movement(ctx, state)
         assert mock_adj.called
+
+    @patch("game_loop.adjudicate")
+    def test_logs_resolved_units(
+        self, mock_adj, ctx, state, game_dir
+    ):
+        mock_adj.return_value = {
+            "year": 1901,
+            "phase": "Spring Retreat",
+            "units": state["units"],
+            "sc_ownership": state["sc_ownership"],
+            "eliminated": [],
+            "winner": None,
+            "game_id": "test-001",
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01",
+        }
+        game_loop.adjudicate_movement(ctx, state)
+
+        log_path = os.path.join(game_dir, "log.jsonl")
+        with open(log_path) as f:
+            events = [json.loads(l) for l in f if l.strip()]
+        adj_events = [
+            e for e in events if e.get("event") == "adjudication"
+        ]
+        assert len(adj_events) >= 1
+        assert "resolved_units" in adj_events[0]
+        assert adj_events[0]["resolved_units"] == state["units"]
 
 
 # --- Tests: Win detection ---
