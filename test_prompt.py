@@ -12,7 +12,6 @@ from game_state import (
 from message_router import init_message_dirs, send_message
 from prompt import (
     adjustment_prompt,
-    bootstrap_prompt,
     retreat_prompt,
     season_turn_prompt,
     system_prompt,
@@ -103,54 +102,28 @@ class TestSystemPrompt:
         assert "submit" in sp_lower
 
 
-class TestBootstrapPrompt:
-    def test_contains_power_name(self):
-        bp = bootstrap_prompt("Austria")
-        assert "Austria" in bp
-
-    def test_contains_email(self):
-        bp = bootstrap_prompt("England")
-        assert "england@perfid.local" in bp
-
-    def test_contains_key_gen_command(self):
-        bp = bootstrap_prompt("France")
-        assert "gen-key" in bp or "generate" in bp.lower()
-
-    def test_contains_export_command(self):
-        bp = bootstrap_prompt("Germany")
-        assert "--export" in bp
-
-    def test_contains_import_command(self):
-        bp = bootstrap_prompt("Italy")
-        assert "--import" in bp
-
-    def test_contains_trust_setup(self):
-        bp = bootstrap_prompt("Russia")
-        assert "trust" in bp.lower()
-
-
 class TestSeasonTurnPrompt:
     def test_contains_phase_info(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "Spring" in stp
         assert "1901" in stp
 
     def test_contains_unit_positions(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "London" in stp
         assert "Edinburgh" in stp
         assert "Liverpool" in stp
 
     def test_contains_sc_info(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("France", state, game_dir)
+        stp = season_turn_prompt("France", state, game_dir, round_num=4)
         assert "3 SCs" in stp  # France starts with 3
 
     def test_empty_inbox_shown(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "no messages" in stp.lower()
 
     def test_inbox_with_messages(self, state, game_dir):
@@ -162,12 +135,12 @@ class TestSeasonTurnPrompt:
         from message_router import route_messages
         route_messages(game_dir, "France")
 
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "France" in stp
 
     def test_contains_order_instructions(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("Germany", state, game_dir)
+        stp = season_turn_prompt("Germany", state, game_dir, round_num=4)
         assert "gm@perfid.local" in stp
         assert "Move" in stp
         assert "Hold" in stp
@@ -175,32 +148,96 @@ class TestSeasonTurnPrompt:
 
     def test_contains_example_orders(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("France", state, game_dir)
+        stp = season_turn_prompt("France", state, game_dir, round_num=4)
         assert "Paris" in stp
 
     def test_contains_messaging_instructions(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("Germany", state, game_dir)
+        stp = season_turn_prompt("Germany", state, game_dir, round_num=4)
         assert "encrypt" in stp.lower()
         assert "outbox" in stp.lower()
 
     def test_emphasizes_winning(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "18 SCs" in stp
         assert "solo victory" in stp.lower()
 
     def test_all_powers_units_shown(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         for power in POWERS:
             assert power in stp
 
     def test_fall_phase(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
         state["phase"] = Phase.FALL.value
-        stp = season_turn_prompt("France", state, game_dir)
+        stp = season_turn_prompt("France", state, game_dir, round_num=4)
         assert "Fall" in stp
+
+    def test_no_submission_status_shown(self, state, game_dir):
+        """Blind mode: no Order Submission Status section."""
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
+        assert "Submission Status" not in stp
+        assert "Submitted:" not in stp
+        assert "Pending:" not in stp
+
+    def test_dropbox_path_in_orders(self, state, game_dir):
+        """Order path uses dropbox, not direct orders dir."""
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "France", state, game_dir, round_num=4,
+            dropbox="/tmp/orders-france",
+        )
+        assert "/tmp/orders-france" in stp
+
+
+class TestNegotiationPrompt:
+    def test_round_1_no_orders(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "England", state, game_dir, round_num=1,
+        )
+        assert "cannot submit orders" in stp.lower()
+        assert "1/3" in stp or "1 of 3" in stp
+
+    def test_round_2_negotiation_only(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "France", state, game_dir, round_num=2,
+        )
+        assert "cannot submit orders" in stp.lower()
+        assert "negotiation" in stp.lower()
+
+    def test_round_3_still_negotiation(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "Germany", state, game_dir, round_num=3,
+        )
+        assert "cannot submit orders" in stp.lower()
+
+    def test_round_4_can_submit(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "Italy", state, game_dir, round_num=4,
+        )
+        assert "submit" in stp.lower()
+        assert "cannot submit" not in stp.lower()
+
+    def test_negotiation_has_inbox(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "England", state, game_dir, round_num=1,
+        )
+        assert "Inbox" in stp
+
+    def test_negotiation_has_jdip(self, state, game_dir):
+        init_message_dirs(game_dir, POWERS)
+        stp = season_turn_prompt(
+            "England", state, game_dir, round_num=1,
+        )
+        assert "jDip" in stp or "simulate" in stp.lower()
 
 
 class TestRetreatPrompt:
@@ -325,14 +362,14 @@ class TestAdjustmentPrompt:
 class TestTurnContext:
     def test_spring_returns_season_turn(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
-        tc = turn_context("England", state, game_dir)
+        tc = turn_context("England", state, game_dir, round_num=4)
         assert "Spring" in tc
         assert "orders" in tc.lower()
 
     def test_fall_returns_season_turn(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
         state["phase"] = Phase.FALL.value
-        tc = turn_context("France", state, game_dir)
+        tc = turn_context("France", state, game_dir, round_num=4)
         assert "Fall" in tc
 
     def test_retreat_phase_returns_retreat(self, state, game_dir):
@@ -357,17 +394,21 @@ class TestTurnContext:
         for power in POWERS:
             sp = system_prompt(power)
             assert len(sp) > 100
-            bp = bootstrap_prompt(power)
-            assert len(bp) > 100
-            tc = turn_context(power, state, game_dir)
+            tc = turn_context(power, state, game_dir, round_num=4)
             assert len(tc) > 100
 
-    def test_no_round_num_needed(self, state, game_dir):
-        """Spring/Fall no longer require round_num/max_rounds."""
+    def test_default_round_num(self, state, game_dir):
+        """Without round_num, defaults to round 4 (orders allowed)."""
         init_message_dirs(game_dir, POWERS)
-        # Should not raise — no round_num needed
         tc = turn_context("England", state, game_dir)
         assert len(tc) > 100
+        assert "submit" in tc.lower()
+
+    def test_negotiation_round_via_context(self, state, game_dir):
+        """round_num=1 produces negotiation-only prompt."""
+        init_message_dirs(game_dir, POWERS)
+        tc = turn_context("England", state, game_dir, round_num=1)
+        assert "cannot submit" in tc.lower()
 
 
 class TestEdgeCases:
@@ -376,7 +417,7 @@ class TestEdgeCases:
         state["phase"] = Phase.SPRING.value
         state["units"]["Austria"] = []
         state["eliminated"].append("Austria")
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "eliminated" in stp.lower()
 
     def test_late_game_state(self, state, game_dir):
@@ -387,12 +428,12 @@ class TestEdgeCases:
         state["sc_ownership"]["Belgium"] = "France"
         state["sc_ownership"]["Holland"] = "Germany"
         state["sc_ownership"]["Norway"] = "England"
-        stp = season_turn_prompt("England", state, game_dir)
+        stp = season_turn_prompt("England", state, game_dir, round_num=4)
         assert "1905" in stp
 
     def test_empty_units_list(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
         state["phase"] = Phase.SPRING.value
         state["units"]["Austria"] = []
-        stp = season_turn_prompt("Austria", state, game_dir)
+        stp = season_turn_prompt("Austria", state, game_dir, round_num=4)
         assert "none" in stp.lower()

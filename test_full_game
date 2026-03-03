@@ -5,27 +5,31 @@
 # adjudication, order submission, message routing. Only the AI
 # decision-making (claude) is replaced with prerecorded scenario data.
 #
+# In the new architecture, perfid runs INSIDE the container as Python.
+# The mock claude is installed in the container's PATH, and perfid
+# calls it via sudo -u player.
+#
 # Scenario: complete 1901 year with a dislodgement (Russia dislodges
 # Austria from Galicia via supported attack), retreat, and winter builds.
 #
-# Requires Docker — creates a real game container.
+# Requires Docker — builds and runs the player container image.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PERFID="$SCRIPT_DIR/perfid"
 # Short path to avoid GPG agent socket length limit (108 chars)
 TEST_WS="/tmp/perfid-t$$"
 mkdir -p "$TEST_WS"
-export PERFID_GAMES_DIR="$TEST_WS/g"
+
+PLAYER_IMAGE="perfid-player-test-$$"
 
 pass=0
 fail=0
 game_id="full-$$"
-ctr_name="perfid-${game_id}"
+ctr_name="perfid-test-${game_id}"
 
 cleanup() {
     docker rm -f "$ctr_name" 2>/dev/null || true
-    docker volume rm "perfid-sessions-${game_id}" 2>/dev/null || true
+    docker rmi "$PLAYER_IMAGE" 2>/dev/null || true
     rm -rf "$TEST_WS"
 }
 trap cleanup EXIT
@@ -47,13 +51,25 @@ run_with_timeout() {
 
 echo "=== Full-game integration test (requires Docker) ==="
 
-# -- Ensure clean slate (previous failed run) --
-docker rm -f "$ctr_name" 2>/dev/null || true
-docker volume rm "perfid-sessions-${game_id}" 2>/dev/null || true
+# ===== Build image =====
 
-# ===== Setup =====
+echo "  Building player image..."
+if docker build -f "$SCRIPT_DIR/Dockerfile.player" -t "$PLAYER_IMAGE" "$SCRIPT_DIR" >/dev/null 2>&1; then
+    ok "player image built"
+else
+    ko "player image build failed"
+    echo "FATAL: cannot continue without image" >&2
+    exit 1
+fi
 
-if "$PERFID" new "$game_id" >/dev/null 2>&1; then
+# ===== Create game =====
+
+# Run perfid new inside a container
+mkdir -p "$TEST_WS/g"
+if docker run --rm \
+    -v "$TEST_WS/g:/games" \
+    -e PERFID_GAMES_DIR=/games \
+    "$PLAYER_IMAGE" new "$game_id" >/dev/null 2>&1; then
     ok "perfid new creates game"
 else
     ko "perfid new creates game"
@@ -61,29 +77,43 @@ else
     exit 1
 fi
 
-if "$PERFID" bootstrap "$game_id" >/dev/null 2>&1; then
-    ok "perfid bootstrap generates keys"
+gd="$TEST_WS/g/$game_id"
+
+# Verify keys were generated (new does bootstrap automatically)
+key_count=$(find "$gd/keys" -name "*.key.gpg" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$key_count" -eq 7 ]]; then
+    ok "perfid new generates all 7 player keys"
 else
-    ko "perfid bootstrap generates keys"
+    ko "perfid new generates keys (found $key_count, expected 7)"
     echo "FATAL: cannot continue without keys" >&2
     exit 1
 fi
 
-gd="$PERFID_GAMES_DIR/$game_id"
+# ===== Install mock claude and run game =====
 
-# -- Install mock claude in the container --
+# Run the game loop in a persistent container with mock claude
+echo "  Starting game container..."
+docker run -d --name "$ctr_name" \
+    --entrypoint "" \
+    -v "$TEST_WS/g:/games" \
+    -e PERFID_GAMES_DIR=/games \
+    "$PLAYER_IMAGE" sleep infinity >/dev/null
+
+# Install mock claude (replaces the real claude binary)
 docker cp "$SCRIPT_DIR/test_mock_claude" "$ctr_name:/usr/local/bin/claude"
 docker exec "$ctr_name" chmod +x /usr/local/bin/claude
 
-# ===== Run the full game =====
-
-echo "  Running perfid play (timeout 300s)..."
-run_with_timeout 300 "$PERFID" play "$game_id" >"$TEST_WS/play.log" 2>&1
+echo "  Running perfid play (timeout 60s)..."
+run_with_timeout 60 docker exec \
+    -e PERFID_GAMES_DIR=/games \
+    -e PERFID_MIN_ROUNDS=1 \
+    "$ctr_name" python3 /perfid/perfid play "$game_id" \
+    >"$TEST_WS/play.log" 2>&1
 play_rc=$?
 
-# timeout returns 124 on SIGTERM — expected when mock sleeps at 1902
-if [[ $play_rc -eq 124 ]] || [[ $play_rc -eq 137 ]]; then
-    ok "play loop terminated by timeout (expected at 1902)"
+# Mock claude exits 42 at 1902 → perfid exits 1 (PerfidError)
+if [[ $play_rc -eq 1 ]]; then
+    ok "play loop stopped at 1902 (agent signalled completion)"
 elif [[ $play_rc -eq 0 ]]; then
     ok "play loop exited cleanly"
 else
@@ -259,8 +289,6 @@ has_vienna=$(py_state "
 units = d['units'].get('Austria', [])
 print(any(u['location'] == 'Vienna' for u in units))
 ")
-# Austria retreated A Galicia - Vienna, then built A Budapest.
-# Vienna should have the retreated unit.
 if [[ "$has_vienna" == "True" ]]; then
     ok "Austria has unit in Vienna (retreat destination)"
 else
@@ -268,179 +296,147 @@ else
 fi
 
 echo ""
-echo "--- Log and transcript assertions ---"
+echo "--- Log assertions ---"
 
 if [[ -f "$gd/log.jsonl" ]]; then ok "game log exists"
 else ko "game log not found"; fi
 
-transcript="$PERFID_GAMES_DIR/transcripts/${game_id}.jsonl"
-if [[ -f "$transcript" ]]; then ok "transcript file exists"
-else ko "transcript file not found"; fi
-
-# Transcript should have orders events: Spring(7) + Fall(7) +
-# Fall Retreat(1) + Winter(7) = 22
-if [[ -f "$transcript" ]]; then
-    orders_count=$(python3 -c "
-import json
-count = 0
-with open('$transcript') as f:
-    for line in f:
-        try:
-            if json.loads(line)['event'] == 'orders':
-                count += 1
-        except (json.JSONDecodeError, KeyError):
-            pass
-print(count)
-")
-    if [[ "$orders_count" -ge 22 ]]; then
-        ok "transcript has $orders_count orders events (>=22)"
-    else
-        ko "transcript has $orders_count orders events (expected >=22)"
-    fi
-
-    # agent_turn events >= 22 (Spring 7 + Fall 7 + Retreat 1 + Winter 7)
+if [[ -f "$gd/log.jsonl" ]]; then
+    # agent_turn events with encrypted output
     agent_turn_count=$(python3 -c "
 import json
 count = 0
-with open('$transcript') as f:
+with open('$gd/log.jsonl') as f:
     for line in f:
         try:
-            if json.loads(line)['event'] == 'agent_turn':
+            e = json.loads(line)
+            if e['event'] == 'agent_turn':
                 count += 1
         except (json.JSONDecodeError, KeyError):
             pass
 print(count)
 ")
     if [[ "$agent_turn_count" -ge 22 ]]; then
-        ok "transcript has $agent_turn_count agent_turn events (>=22)"
+        ok "log has $agent_turn_count agent_turn events (>=22)"
     else
-        ko "transcript has $agent_turn_count agent_turn events (expected >=22)"
+        ko "log has $agent_turn_count agent_turn events (expected >=22)"
     fi
 
-    # agent_turn output contains "Strategy:" (rich, not one-liners)
-    has_strategy=$(python3 -c "
+    # agent_turn events have encrypted_output (PGP message)
+    has_encrypted=$(python3 -c "
 import json
 found = False
-with open('$transcript') as f:
-    for line in f:
-        try:
-            e = json.loads(line)
-            if e['event'] == 'agent_turn' and 'Strategy:' in e.get('output', ''):
-                found = True
-                break
-        except (json.JSONDecodeError, KeyError):
-            pass
-print(found)
-")
-    if [[ "$has_strategy" == "True" ]]; then
-        ok "agent_turn output contains Strategy: reasoning"
-    else
-        ko "agent_turn output missing Strategy: reasoning"
-    fi
-
-    # agent_turn output contains "Simulating" (jDip simulation printed)
-    has_simulating=$(python3 -c "
-import json
-found = False
-with open('$transcript') as f:
-    for line in f:
-        try:
-            e = json.loads(line)
-            if e['event'] == 'agent_turn' and 'Simulating with jDip' in e.get('output', ''):
-                found = True
-                break
-        except (json.JSONDecodeError, KeyError):
-            pass
-print(found)
-")
-    if [[ "$has_simulating" == "True" ]]; then
-        ok "agent_turn output contains Simulating with jDip"
-    else
-        ko "agent_turn output missing Simulating with jDip"
-    fi
-
-    # At least one agent_turn contains "Inbox:" with decrypted message text
-    has_inbox_msg=$(python3 -c "
-import json
-found = False
-with open('$transcript') as f:
+with open('$gd/log.jsonl') as f:
     for line in f:
         try:
             e = json.loads(line)
             if e['event'] == 'agent_turn':
-                output = e.get('output', '')
-                if 'Inbox:' in output and 'From ' in output:
+                enc = e.get('encrypted_output', '')
+                if 'BEGIN PGP MESSAGE' in enc:
                     found = True
                     break
         except (json.JSONDecodeError, KeyError):
             pass
 print(found)
 ")
-    if [[ "$has_inbox_msg" == "True" ]]; then
-        ok "agent_turn contains Inbox: with decrypted message"
+    if [[ "$has_encrypted" == "True" ]]; then
+        ok "agent_turn events contain encrypted output"
     else
-        ko "agent_turn missing Inbox: with decrypted message"
+        ko "agent_turn events missing encrypted output"
     fi
 
-    # message events >= 4 (the 4 Spring diplomatic messages)
+    # message_routed events
     msg_count=$(python3 -c "
 import json
 count = 0
-with open('$transcript') as f:
+with open('$gd/log.jsonl') as f:
     for line in f:
         try:
-            if json.loads(line)['event'] == 'message':
+            if json.loads(line)['event'] == 'message_routed':
                 count += 1
         except (json.JSONDecodeError, KeyError):
             pass
 print(count)
 ")
     if [[ "$msg_count" -ge 4 ]]; then
-        ok "transcript has $msg_count message events (>=4)"
+        ok "log has $msg_count message_routed events (>=4)"
     else
-        ko "transcript has $msg_count message events (expected >=4)"
+        ko "log has $msg_count message_routed events (expected >=4)"
     fi
 
-    # adjudication events >= 2 (Spring + Fall movement phases)
+    # adjudication events
     adj_count=$(python3 -c "
 import json
 count = 0
-with open('$transcript') as f:
+with open('$gd/log.jsonl') as f:
     for line in f:
         try:
-            if json.loads(line)['event'] == 'adjudication':
+            e = json.loads(line)
+            if e['event'] == 'adjudication':
                 count += 1
         except (json.JSONDecodeError, KeyError):
             pass
 print(count)
 ")
     if [[ "$adj_count" -ge 2 ]]; then
-        ok "transcript has $adj_count adjudication events (>=2)"
+        ok "log has $adj_count adjudication events (>=2)"
     else
-        ko "transcript has $adj_count adjudication events (expected >=2)"
+        ko "log has $adj_count adjudication events (expected >=2)"
     fi
 
-    # adjudication events contain order_results with per-order data
-    adj_has_results=$(python3 -c "
+    # decrypt_log.py can decrypt the log
+    python3 "$SCRIPT_DIR/decrypt_log.py" \
+        --gm-key "$gd/gm-gpg" "$gd/log.jsonl" \
+        >"$TEST_WS/dec.jsonl" 2>"$TEST_WS/dec.err" || true
+    dec_count=$(cat "$TEST_WS/dec.err" | grep -o '[0-9]*' | head -1)
+    if [[ -n "$dec_count" ]] && [[ "$dec_count" -gt 0 ]]; then
+        ok "decrypt_log.py decrypted $dec_count events"
+    else
+        ko "decrypt_log.py failed to decrypt events"
+    fi
+
+    # Decrypted output contains Strategy: reasoning
+    has_strategy=$(python3 -c "
 import json
 found = False
-with open('$transcript') as f:
+with open('$TEST_WS/dec.jsonl') as f:
     for line in f:
         try:
             e = json.loads(line)
-            if e['event'] == 'adjudication':
-                results = e.get('order_results', [])
-                if isinstance(results, list) and len(results) > 0:
+            if e.get('event') == 'agent_turn' and 'Strategy:' in e.get('output', ''):
+                found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+" || echo "False")
+    if [[ "$has_strategy" == "True" ]]; then
+        ok "decrypted agent_turn output contains Strategy: reasoning"
+    else
+        ko "decrypted agent_turn output missing Strategy: reasoning"
+    fi
+
+    # No plaintext agent reasoning in unencrypted log
+    has_plaintext=$(python3 -c "
+import json
+found = False
+with open('$gd/log.jsonl') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e.get('event') == 'agent_turn':
+                # Should NOT have plaintext 'output', only 'encrypted_output'
+                if 'output' in e and 'Strategy:' in e.get('output', ''):
                     found = True
                     break
         except (json.JSONDecodeError, KeyError):
             pass
 print(found)
 ")
-    if [[ "$adj_has_results" == "True" ]]; then
-        ok "adjudication events contain order_results"
+    if [[ "$has_plaintext" == "False" ]]; then
+        ok "no plaintext agent reasoning in unencrypted log"
     else
-        ko "adjudication events missing order_results"
+        ko "plaintext agent reasoning found in unencrypted log!"
     fi
 fi
 
@@ -449,12 +445,6 @@ echo "--- Security assertions ---"
 
 if [[ ! -f "$gd/master.passphrase" ]]; then ok "master.passphrase never created"
 else ko "master.passphrase exists!"; fi
-
-if docker exec "$ctr_name" test -e /game/transcripts 2>/dev/null; then
-    ko "transcript visible inside container!"
-else
-    ok "transcript not visible inside container"
-fi
 
 # ===== Results =====
 

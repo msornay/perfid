@@ -19,6 +19,7 @@ Directory layout inside a game dir:
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import gpg as gpg_mod
@@ -235,11 +236,6 @@ def _unit_type_abbrev(unit_type):
     return unit_type
 
 
-def _normalize_loc(location):
-    """Normalize a location for comparison (strip whitespace, title case)."""
-    return location.strip()
-
-
 def _unit_matches(unit_dict, unit_type, location):
     """Check if a unit dict from game state matches a parsed order's unit."""
     ut = _unit_type_abbrev(unit_dict["type"])
@@ -410,8 +406,9 @@ def _orders_dir(game_dir, year, phase):
 
 
 def submit_orders(game_dir, power, year, phase, order_strings,
-                  agent_gnupghome, gm_email="gm@perfid.local"):
-    """Submit orders: encrypt with GM's public key, write to orders dir.
+                  agent_gnupghome, gm_email="gm@perfid.local",
+                  dropbox=None):
+    """Submit orders: encrypt with GM's public key, write to dir.
 
     The agent's keyring must have the GM's public key imported.
 
@@ -423,11 +420,17 @@ def submit_orders(game_dir, power, year, phase, order_strings,
         order_strings: List of order strings.
         agent_gnupghome: Path to the agent's GPG home (has GM pub key).
         gm_email: GM's email for encryption.
+        dropbox: If set, write to this directory instead of the
+            main orders dir. Used for blind-mode order submission.
 
     Returns:
         Path to the written .gpg file.
     """
-    orders_d = _orders_dir(game_dir, year, phase)
+    if dropbox:
+        target_dir = Path(dropbox)
+        target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir = _orders_dir(game_dir, year, phase)
 
     payload = json.dumps({
         "power": power,
@@ -436,7 +439,7 @@ def submit_orders(game_dir, power, year, phase, order_strings,
         "orders": order_strings,
     }, indent=2)
 
-    output_path = str(orders_d / f"{power}.gpg")
+    output_path = str(target_dir / f"{power}.gpg")
     gpg_mod.encrypt_to_file(
         agent_gnupghome, payload, gm_email, output_path
     )
@@ -548,6 +551,34 @@ def has_submitted(game_dir, power, year, phase):
     """Check if a power has already submitted orders."""
     orders_d = _orders_dir(game_dir, year, phase)
     return (orders_d / f"{power}.gpg").exists()
+
+
+def collect_from_dropbox(game_dir, power, year, phase, dropbox):
+    """Move orders from a per-power dropbox to the real orders dir.
+
+    Called by the game loop (as root) after each agent's turn.
+    Overwrites any existing order file for the power (re-submission).
+
+    Args:
+        game_dir: Path to game directory.
+        power: Power name.
+        year: Game year.
+        phase: Phase label.
+        dropbox: Path to the power's dropbox directory.
+
+    Returns:
+        True if an order file was collected, False otherwise.
+    """
+    dropbox = Path(dropbox)
+    src = dropbox / f"{power}.gpg"
+    if not src.exists():
+        return False
+
+    orders_d = _orders_dir(game_dir, year, phase)
+    dest = orders_d / f"{power}.gpg"
+    shutil.copy2(str(src), str(dest))
+    src.unlink()
+    return True
 
 
 # --- Private notes ---

@@ -155,45 +155,94 @@ class TestFileEncryption:
         assert decrypted == plaintext
 
 
-class TestGameSetup:
-    def test_setup_gm_keys(self, tmp_path):
-        game_dir = str(tmp_path / "game-001")
-        gm_home, fp = gpg.setup_gm_keys(game_dir)
-        assert fp is not None
-        assert os.path.isdir(gm_home)
-        pubkey_path = os.path.join(game_dir, "pubkeys", "GM.asc")
-        assert os.path.exists(pubkey_path)
-        with open(pubkey_path) as f:
+class TestGeneratePlayerKey:
+    def test_creates_encrypted_key(self, tmp_path):
+        game_dir = str(tmp_path / "game")
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        result = gpg.generate_player_key(game_dir, "France", gm_home)
+        assert os.path.exists(result)
+        assert result.endswith(".key.gpg")
+
+    def test_creates_public_key(self, tmp_path):
+        game_dir = str(tmp_path / "game")
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        gpg.generate_player_key(game_dir, "England", gm_home)
+        pubkey = os.path.join(game_dir, "pubkeys", "England.asc")
+        assert os.path.exists(pubkey)
+        with open(pubkey) as f:
             assert "BEGIN PGP PUBLIC KEY BLOCK" in f.read()
 
-    def test_setup_agent_keys(self, tmp_path):
-        agent_home = str(tmp_path / "agent-gnupg")
-        fp, pub_key = gpg.setup_agent_keys(agent_home, "England")
+    def test_encrypted_key_decryptable(self, tmp_path):
+        game_dir = str(tmp_path / "game")
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        enc_path = gpg.generate_player_key(
+            game_dir, "Germany", gm_home
+        )
+        # GM can decrypt the key
+        decrypted = gpg.decrypt_file(gm_home, enc_path)
+        assert "PRIVATE KEY" in decrypted
+
+    def test_decrypted_key_importable(self, tmp_path):
+        game_dir = str(tmp_path / "game")
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        enc_path = gpg.generate_player_key(
+            game_dir, "Italy", gm_home
+        )
+        # Decrypt and import into a fresh keyring
+        decrypted = gpg.decrypt_file(gm_home, enc_path)
+        fresh = str(tmp_path / "fresh")
+        gpg.init_gnupghome(fresh)
+        fp = gpg.import_key(fresh, decrypted)
         assert fp is not None
-        assert "BEGIN PGP PUBLIC KEY BLOCK" in pub_key
+        assert len(fp) == 40
 
-    def test_publish_agent_key(self, tmp_path):
-        game_dir = str(tmp_path / "game-001")
-        gpg.publish_agent_key(game_dir, "France", "---fake key---")
-        path = os.path.join(game_dir, "pubkeys", "France.asc")
-        assert os.path.exists(path)
-        with open(path) as f:
-            assert f.read() == "---fake key---"
+    def test_all_powers(self, tmp_path):
+        game_dir = str(tmp_path / "game")
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        for power in gpg.POWERS:
+            gpg.generate_player_key(game_dir, power, gm_home)
+        keys_dir = os.path.join(game_dir, "keys")
+        pubkeys_dir = os.path.join(game_dir, "pubkeys")
+        for power in gpg.POWERS:
+            assert os.path.exists(
+                os.path.join(keys_dir, f"{power}.key.gpg")
+            )
+            assert os.path.exists(
+                os.path.join(pubkeys_dir, f"{power}.asc")
+            )
 
+
+class TestImportAllPubkeys:
     def test_import_all_pubkeys(self, tmp_path):
         game_dir = str(tmp_path / "game-001")
         importer_home = str(tmp_path / "importer")
 
-        # Set up GM and two agents
-        gpg.setup_gm_keys(game_dir)
+        # Generate GM key and publish
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        pubkeys_dir = os.path.join(game_dir, "pubkeys")
+        os.makedirs(pubkeys_dir, exist_ok=True)
+        gm_pub = gpg.export_public_key(gm_home, "gm@perfid.local")
+        with open(os.path.join(pubkeys_dir, "GM.asc"), "w") as f:
+            f.write(gm_pub)
 
-        agent1_home = str(tmp_path / "agent1")
-        _, pub1 = gpg.setup_agent_keys(agent1_home, "England")
-        gpg.publish_agent_key(game_dir, "England", pub1)
+        # Generate two agent keys and publish
+        eng_home = str(tmp_path / "eng")
+        gpg.generate_key(eng_home, "England", "england@perfid.local")
+        eng_pub = gpg.export_public_key(eng_home, "england@perfid.local")
+        with open(os.path.join(pubkeys_dir, "England.asc"), "w") as f:
+            f.write(eng_pub)
 
-        agent2_home = str(tmp_path / "agent2")
-        _, pub2 = gpg.setup_agent_keys(agent2_home, "France")
-        gpg.publish_agent_key(game_dir, "France", pub2)
+        fra_home = str(tmp_path / "fra")
+        gpg.generate_key(fra_home, "France", "france@perfid.local")
+        fra_pub = gpg.export_public_key(fra_home, "france@perfid.local")
+        with open(os.path.join(pubkeys_dir, "France.asc"), "w") as f:
+            f.write(fra_pub)
 
         # Import all into a fresh keyring
         gpg.init_gnupghome(importer_home)
@@ -207,18 +256,28 @@ class TestGameSetup:
     def test_full_agent_communication_flow(self, tmp_path):
         """End-to-end: GM + 2 agents, key exchange, encrypted messaging."""
         game_dir = str(tmp_path / "game-full")
+        pubkeys_dir = os.path.join(game_dir, "pubkeys")
+        os.makedirs(pubkeys_dir, exist_ok=True)
 
         # 1. GM setup
-        gm_home, _ = gpg.setup_gm_keys(game_dir)
+        gm_home = str(tmp_path / "gm")
+        gpg.generate_key(gm_home, "GM", "gm@perfid.local")
+        gm_pub = gpg.export_public_key(gm_home, "gm@perfid.local")
+        with open(os.path.join(pubkeys_dir, "GM.asc"), "w") as f:
+            f.write(gm_pub)
 
         # 2. Agent key generation + publishing
         eng_home = str(tmp_path / "eng")
-        _, eng_pub = gpg.setup_agent_keys(eng_home, "England")
-        gpg.publish_agent_key(game_dir, "England", eng_pub)
+        gpg.generate_key(eng_home, "England", "england@perfid.local")
+        eng_pub = gpg.export_public_key(eng_home, "england@perfid.local")
+        with open(os.path.join(pubkeys_dir, "England.asc"), "w") as f:
+            f.write(eng_pub)
 
         fra_home = str(tmp_path / "fra")
-        _, fra_pub = gpg.setup_agent_keys(fra_home, "France")
-        gpg.publish_agent_key(game_dir, "France", fra_pub)
+        gpg.generate_key(fra_home, "France", "france@perfid.local")
+        fra_pub = gpg.export_public_key(fra_home, "france@perfid.local")
+        with open(os.path.join(pubkeys_dir, "France.asc"), "w") as f:
+            f.write(fra_pub)
 
         # 3. Each agent imports all pubkeys
         gpg.import_all_pubkeys(eng_home, game_dir)

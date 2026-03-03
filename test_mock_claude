@@ -9,14 +9,13 @@ replaced with prerecorded scenario data.
 Prints rich, detailed output to stdout — strategy reasoning, simulation
 results, order rationale, inbox messages (decrypted via GPG), and
 diplomatic message content. This output is captured by run_agent's tee
-and logged to the TranscriptLogger automatically.
+and logged to the GameLogger automatically.
 
 Installed via: docker cp test_mock_claude <ctr>:/usr/local/bin/claude
 """
 import os
 import subprocess
 import sys
-import time
 
 sys.path.insert(0, '/perfid')
 
@@ -298,9 +297,9 @@ def print_position(state, power):
           f"({', '.join(sc_names)})")
 
 
-def print_inbox(power, gnupghome):
+def print_inbox(power, gnupghome, game_dir='/game'):
     """Read and decrypt inbox messages. Returns list of messages."""
-    messages = list_inbox('/game', power)
+    messages = list_inbox(game_dir, power)
     if not messages:
         print("Inbox: (empty)")
         return []
@@ -366,7 +365,9 @@ def print_simulation(result, power, orders):
 
 
 def main():
-    state = load_state('/game')
+    game_dir = os.environ.get('PERFID_GAME_DIR', '/game')
+    dropbox = os.environ.get('PERFID_DROPBOX', '')
+    state = load_state(game_dir)
     power = get_power()
     gnupghome = os.environ['GNUPGHOME']
     year = state['year']
@@ -374,11 +375,11 @@ def main():
 
     print(f"\n=== {power} — {phase} {year} ===\n")
 
-    # At year 1902+, sleep so the test's timeout kills the play loop
+    # At year 1902+, signal the game loop to stop by exiting
+    # with code 42. The test expects a timeout or non-zero exit.
     if year >= 1902:
-        print(f"Year {year} reached. Waiting for game master "
-              f"instructions.\n")
-        time.sleep(86400)
+        print(f"Year {year} reached. Test scenario complete.\n")
+        sys.exit(42)
         return
 
     orders = SCENARIO.get(phase, {}).get(power, [])
@@ -389,7 +390,7 @@ def main():
     print()
 
     # Read inbox (exercises real GPG decrypt path)
-    print_inbox(power, gnupghome)
+    print_inbox(power, gnupghome, game_dir)
     print()
 
     # Strategy reasoning
@@ -406,7 +407,8 @@ def main():
         for order in orders:
             print(f"  {order}")
         submit_orders(
-            '/game', power, year, phase, orders, gnupghome,
+            game_dir, power, year, phase, orders, gnupghome,
+            dropbox=dropbox or None,
         )
         print()
 
@@ -425,7 +427,8 @@ def main():
         for order in orders:
             print(f"  {order}")
         submit_orders(
-            '/game', power, year, phase, orders, gnupghome,
+            game_dir, power, year, phase, orders, gnupghome,
+            dropbox=dropbox or None,
         )
         print()
 
@@ -452,7 +455,8 @@ def main():
         for order in orders:
             print(f"  {order}")
         submit_orders(
-            '/game', power, year, phase, orders, gnupghome,
+            game_dir, power, year, phase, orders, gnupghome,
+            dropbox=dropbox or None,
         )
         print()
 
@@ -466,7 +470,7 @@ def main():
                     f'{recipient.lower()}@perfid.local',
                 )
                 send_message(
-                    '/game', power, recipient, phase, 1, ct,
+                    game_dir, power, recipient, phase, 1, ct,
                 )
                 print(f'Sending message to {recipient}: "{text}"')
                 sent_any = True

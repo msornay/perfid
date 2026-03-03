@@ -1,927 +1,169 @@
-#!/usr/bin/env bash
-# perfid — Orchestrate 7 Claude agents playing Diplomacy with GPG encryption.
-#
-# Game data lives in $PERFID_GAMES_DIR/<game-id>/ (default: perfid-games/).
-# All agents run in a single Docker container with per-turn GPG key injection.
-set -euo pipefail
+#!/usr/bin/env python3
+"""perfid — Orchestrate 7 Claude agents playing Diplomacy with GPG encryption.
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GAMES_DIR="${PERFID_GAMES_DIR:-perfid-games}"
-PLAYER_IMAGE="${PERFID_PLAYER_IMAGE:-perfid-player}"
+Runs inside the container. Container lifecycle (create/destroy) is
+handled by the Makefile. This script handles game initialization,
+the main game loop, and status reporting.
 
-POWERS=(Austria England France Germany Italy Russia Turkey)
+Game data lives in $PERFID_GAMES_DIR/<game-id>/ (default: perfid-games/).
+"""
 
-lowercase() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-
-# Wait for background agent PIDs and report failures.
-# Usage: wait_agents "${pids[@]}" -- "${powers[@]}"
-wait_agents() {
-  local pids=() powers=() sep=false
-  for arg in "$@"; do
-    if [[ "$arg" == "--" ]]; then
-      sep=true; continue
-    fi
-    if $sep; then
-      powers+=("$arg")
-    else
-      pids+=("$arg")
-    fi
-  done
-  local i failures=0
-  for i in "${!pids[@]}"; do
-    wait "${pids[$i]}" 2>/dev/null || {
-      echo "    Warning: ${powers[$i]} failed" >&2
-      failures=$((failures + 1))
-    }
-  done
-  return "$failures"
-}
-
-usage() {
-  cat <<'USAGE'
-Usage: perfid <command> <game-id>
-
-Commands:
-  new       <game-id>     Create game, container, and GM keys
-  login     <game-id>     Authenticate Claude inside the container
-  bootstrap <game-id>     Generate GPG keys for all powers
-  play      <game-id>     Main loop: free-form turns → adjudicate
-  status    <game-id>     Print current standings
-  destroy   <game-id>     Tear down container and volumes
-USAGE
-  exit 1
-}
-
-[[ $# -eq 0 ]] && usage
-cmd=$1; shift
-
-require_game_id() {
-  if [[ $# -lt 1 ]] || [[ -z "$1" ]]; then
-    echo "Usage: perfid $cmd <game-id>" >&2
-    exit 1
-  fi
-  if [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
-    echo "Error: invalid game-id '$1'. Use only letters, digits, hyphens, underscores, and dots." >&2
-    exit 1
-  fi
-  echo "$1"
-}
-
-game_dir() {
-  echo "$GAMES_DIR/$1"
-}
-
-require_game_exists() {
-  local gd
-  gd=$(game_dir "$1")
-  if [[ ! -f "$gd/state.json" ]]; then
-    echo "Error: game '$1' not found at $gd" >&2
-    exit 1
-  fi
-  echo "$gd"
-}
-
-# --- GPG key management ---
-
-# Generate and store encrypted GPG key for a power.
-generate_player_key() {
-  local gd=$1 power=$2 gm_gpg=$3
-  local tmpdir key_email
-  tmpdir=$(mktemp -d)
-  key_email="$(lowercase "$power")@perfid.local"
-
-  chmod 700 "$tmpdir"
-  gpg --batch --homedir "$tmpdir" --gen-key <<KEYEOF
-Key-Type: RSA
-Key-Length: 2048
-Name-Real: $power
-Name-Email: $key_email
-Expire-Date: 0
-%no-protection
-%commit
-KEYEOF
-
-  # Export and encrypt private key with GM's public key
-  mkdir -p "$gd/keys"
-  gpg --homedir "$tmpdir" --armor --export-secret-keys "$key_email" \
-    | gpg --batch --yes --homedir "$gm_gpg" --trust-model always \
-          --encrypt --recipient gm@perfid.local \
-          --output "$gd/keys/${power}.key.gpg"
-
-  # Export public key
-  mkdir -p "$gd/pubkeys"
-  gpg --homedir "$tmpdir" --armor --export "$key_email" \
-    > "$gd/pubkeys/${power}.asc"
-
-  rm -rf "$tmpdir"
-}
-
-# Inject GPG keys into the container for a power's turn.
-setup_turn_gpg() {
-  local game_id=$1 power=$2 gm_gpg=$3 gd=$4
-  local ctr_name="perfid-${game_id}"
-  local gpg_dir="/tmp/gpg-$(lowercase "$power")"
-
-  # Create temp GNUPGHOME in container, owned by player
-  docker exec "$ctr_name" mkdir -p "$gpg_dir"
-  docker exec "$ctr_name" chmod 700 "$gpg_dir"
-  docker exec "$ctr_name" chown -R player:player "$gpg_dir"
-
-  # Symlink ~/.gnupg so bare gpg commands use the right keyring
-  docker exec -u player "$ctr_name" ln -sfn "$gpg_dir" /home/player/.gnupg
-
-  # Decrypt private key with GM's private key and import into container
-  local key_file="$gd/keys/${power}.key.gpg"
-  if [[ ! -f "$key_file" ]]; then
-    echo "Error: key file missing for $power: $key_file" >&2
-    echo "Run 'perfid bootstrap $game_id' to generate keys." >&2
-    return 1
-  fi
-  gpg --batch --yes --pinentry-mode loopback --homedir "$gm_gpg" --decrypt "$key_file" 2>/dev/null \
-    | docker exec -i -u player "$ctr_name" gpg --batch --homedir "$gpg_dir" --import 2>/dev/null
-  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-    echo "Error: failed to decrypt $power's key with GM key" >&2
-    return 1
-  fi
-
-  # Import all public keys
-  for pubkey in "$gd/pubkeys/"*.asc; do
-    docker exec -i -u player "$ctr_name" gpg --batch --homedir "$gpg_dir" --import < "$pubkey" 2>/dev/null || true
-  done
-
-  # Trust all keys
-  docker exec -u player "$ctr_name" bash -c "
-    gpg --homedir $gpg_dir --list-keys --with-colons 2>/dev/null \
-      | grep '^fpr:' | cut -d: -f10 \
-      | while read -r fp; do echo \"\$fp:5:\" | gpg --homedir $gpg_dir --import-ownertrust 2>/dev/null; done
-  "
-
-  # Wipe any leftover plaintext from a previous power (safety)
-  docker exec -u player "$ctr_name" rm -rf /home/player/.claude/projects 2>/dev/null || true
-
-  # Decrypt this power's encrypted memory archive if it exists
-  local lc_power
-  lc_power=$(lowercase "$power")
-  local enc_file="/home/player/.claude/.encrypted/${lc_power}.tar.gpg"
-  docker exec -u player "$ctr_name" bash -c "
-    if [ -f '$enc_file' ]; then
-      gpg --batch --yes --homedir $gpg_dir --decrypt '$enc_file' 2>/dev/null \
-        | tar xf - -C /home/player/.claude/
-    fi
-  "
-}
-
-# Clean up GPG keys after a power's turn.
-# Encrypts Claude memory with the power's GPG key before wiping.
-cleanup_turn_gpg() {
-  local game_id=$1 power=$2
-  local ctr_name="perfid-${game_id}"
-  local lc_power
-  lc_power=$(lowercase "$power")
-  local gpg_dir="/tmp/gpg-${lc_power}"
-  local key_email="${lc_power}@perfid.local"
-  local enc_dir="/home/player/.claude/.encrypted"
-
-  # Encrypt Claude memory before removing keys
-  docker exec -u player "$ctr_name" mkdir -p "$enc_dir" 2>/dev/null || true
-  docker exec -u player "$ctr_name" bash -c "
-    if [ -d /home/player/.claude/projects ] && [ \"\$(ls -A /home/player/.claude/projects 2>/dev/null)\" ]; then
-      tar cf - -C /home/player/.claude projects \
-        | gpg --batch --yes --homedir $gpg_dir --trust-model always \
-              --encrypt --recipient '$key_email' \
-              -o '${enc_dir}/${lc_power}.tar.gpg' 2>/dev/null
-    fi
-  "
-
-  # Wipe plaintext memory
-  docker exec -u player "$ctr_name" rm -rf /home/player/.claude/projects 2>/dev/null || true
-
-  # Remove GPG keys
-  docker exec "$ctr_name" rm -rf "$gpg_dir" 2>/dev/null || true
-}
-
-# --- Session management ---
-
-get_session_id() {
-  local gd=$1 power=$2
-  python3 -c "
+import argparse
+import os
 import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import get_session_id
-print(get_session_id('$gd', '$power'))
-"
-}
 
-is_session_started() {
-  local gd=$1 power=$2
-  python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_sessions
-sessions = load_sessions('$gd')
-s = sessions.get('$power', {})
-print('true' if s.get('started', False) else 'false')
-"
-}
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GAMES_DIR = os.environ.get("PERFID_GAMES_DIR", "perfid-games")
 
-mark_session_started() {
-  local gd=$1 power=$2
-  python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import mark_session_started
-mark_session_started('$gd', '$power')
-"
-}
+# Ensure script directory is on the Python path for module imports
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
-# --- Agent execution ---
 
-run_agent() {
-  local game_id=$1 power=$2 prompt=$3 gd=$4
-  local ctr_name="perfid-${game_id}"
-  local gpg_dir="/tmp/gpg-$(lowercase "$power")"
-  local session_id started exit_code=0
+from game_loop import PerfidError  # noqa: E402
+from game_state import POWERS, new_game, load_state, format_status  # noqa: E402
+from gpg import generate_player_key  # noqa: E402
+from logger import GameLogger  # noqa: E402
+from message_router import init_message_dirs  # noqa: E402
 
-  session_id=$(get_session_id "$gd" "$power")
-  started=$(is_session_started "$gd" "$power")
 
-  local tmpfile
-  tmpfile=$(mktemp)
+GAME_ID_PATTERN = r'^[a-zA-Z0-9][a-zA-Z0-9_.\-]*$'
 
-  if [[ "$started" == "false" ]]; then
-    # First call: send system prompt + turn prompt
-    local sys_prompt
-    sys_prompt=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from prompt import system_prompt
-print(system_prompt('$power'))
-")
-    docker exec -u player -e "GNUPGHOME=$gpg_dir" "$ctr_name" \
-      claude --session-id "$session_id" \
-        -p "$sys_prompt" -p "$prompt" \
-        --dangerously-skip-permissions --verbose 2>&1 | tee "$tmpfile"
-    exit_code=${PIPESTATUS[0]}
-    mark_session_started "$gd" "$power"
-  else
-    # Subsequent calls: resume session with turn prompt
-    docker exec -u player -e "GNUPGHOME=$gpg_dir" "$ctr_name" \
-      claude --resume "$session_id" \
-        -p "$prompt" \
-        --dangerously-skip-permissions --verbose 2>&1 | tee "$tmpfile"
-    exit_code=${PIPESTATUS[0]}
-  fi
 
-  # Log agent output to transcript
-  python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from logger import TranscriptLogger
-from game_state import load_state
+def validate_game_id(game_id):
+    """Validate game-id format."""
+    import re
+    if not re.match(GAME_ID_PATTERN, game_id):
+        raise PerfidError(
+            f"invalid game-id '{game_id}'. "
+            "Use only letters, digits, hyphens, underscores, and dots."
+        )
+    return game_id
 
-state = load_state('$gd')
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-output = open('$tmpfile').read()
-tl.agent_turn('$power', state['year'], state['phase'], output)
-"
-  rm -f "$tmpfile"
-  return "$exit_code"
-}
 
-# Check if a power has submitted orders for the current phase.
-orders_exist() {
-  local gd=$1 power=$2
-  python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-from orders import has_submitted
-state = load_state('$gd')
-print('true' if has_submitted('$gd', '$power', state['year'], state['phase']) else 'false')
-"
-}
+def game_dir(game_id):
+    """Return the game directory path."""
+    return os.path.join(GAMES_DIR, game_id)
 
-case "$cmd" in
-  new)
-    game_id=$(require_game_id "$@")
-    gd=$(game_dir "$game_id")
 
-    if [[ -d "$gd" ]]; then
-      echo "Error: game directory $gd already exists." >&2
-      exit 1
-    fi
+def require_game_exists(game_id):
+    """Verify a game exists and return its directory."""
+    gd = game_dir(game_id)
+    if not os.path.isfile(os.path.join(gd, "state.json")):
+        raise PerfidError(f"game '{game_id}' not found at {gd}")
+    return gd
 
-    echo "Creating game '$game_id'..."
+
+def cmd_new(args):
+    """Create a new game: directory, state, GM keys, player keys."""
+    game_id = validate_game_id(args.game_id)
+    gd = game_dir(game_id)
+
+    if os.path.isdir(gd):
+        raise PerfidError(f"game directory {gd} already exists.")
+
+    print(f"Creating game '{game_id}'...")
 
     # Initialize game state and message directories
-    python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import new_game
-from message_router import init_message_dirs
+    state = new_game(game_id, gd)
+    init_message_dirs(gd, state["units"].keys())
+    print(f"Game state initialized: {state['year']} {state['phase']}")
 
-state = new_game('$game_id', '$gd')
-init_message_dirs('$gd', state['units'].keys())
-print(f\"Game state initialized: {state['year']} {state['phase']}\")
-"
-
-    # Create pubkeys, orders, and notes directories
-    mkdir -p "$gd/pubkeys" "$gd/orders" "$gd/notes"
+    # Create additional directories
+    for subdir in ("pubkeys", "orders", "notes"):
+        os.makedirs(os.path.join(gd, subdir), exist_ok=True)
 
     # Generate GM GPG key
-    gm_gpg="$gd/gm-gpg"
-    mkdir -p "$gm_gpg"
-    chmod 700 "$gm_gpg"
-    gpg --batch --homedir "$gm_gpg" --gen-key <<KEYEOF
-Key-Type: RSA
-Key-Length: 2048
-Name-Real: GM
-Name-Email: gm@perfid.local
-Expire-Date: 0
-%no-protection
-%commit
-KEYEOF
-    gpg --homedir "$gm_gpg" --armor --export gm@perfid.local \
-      > "$gd/pubkeys/GM.asc"
-    echo "GM GPG key generated."
+    gm_gpg = os.path.join(gd, "gm-gpg")
+    os.makedirs(gm_gpg, mode=0o700, exist_ok=True)
 
-    # Build player image if needed
-    if ! docker image inspect "$PLAYER_IMAGE" >/dev/null 2>&1; then
-      echo "Building player image..."
-      docker build -f "$SCRIPT_DIR/Dockerfile.player" -t "$PLAYER_IMAGE" "$SCRIPT_DIR"
-    fi
+    from gpg import generate_key, export_public_key
+    generate_key(gm_gpg, "GM", "gm@perfid.local")
+    gm_pub = export_public_key(gm_gpg, "gm@perfid.local")
+    pubkey_path = os.path.join(gd, "pubkeys", "GM.asc")
+    with open(pubkey_path, "w") as f:
+        f.write(gm_pub)
+    print("GM GPG key generated.")
 
-    # Create single Docker container
-    abs_gd="$(cd "$gd" && pwd)"
-    ctr_name="perfid-${game_id}"
-    echo "  Creating container: $ctr_name"
-    docker run -d --name "$ctr_name" \
-      -v "$abs_gd:/game" \
-      -v "$SCRIPT_DIR:/perfid:ro" \
-      -v "perfid-sessions-${game_id}:/home/player/.claude" \
-      -w /game \
-      "$PLAYER_IMAGE" >/dev/null || {
-      echo "Error: failed to create container" >&2
-      exit 1
+    # Generate player keys (replaces separate bootstrap step)
+    print("Generating player keys...")
+    for power in POWERS:
+        print(f"  Generating keys for {power}...")
+        generate_player_key(gd, power, gm_gpg)
+
+    # Log game creation
+    logger = GameLogger(gd)
+    logger.game_created(game_id, POWERS)
+
+    print(f"Game '{game_id}' created at {gd}")
+    print(f"Keys stored in {gd}/keys/ and {gd}/pubkeys/")
+
+
+def cmd_play(args):
+    """Run the main game loop."""
+    game_id = validate_game_id(args.game_id)
+    require_game_exists(game_id)
+
+    import game_loop
+    game_loop.run(game_id, GAMES_DIR, SCRIPT_DIR)
+
+
+def cmd_status(args):
+    """Print current game status."""
+    game_id = validate_game_id(args.game_id)
+    gd = require_game_exists(game_id)
+
+    state = load_state(gd)
+    print(format_status(state))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="perfid",
+        description="perfid — 7 Claude agents play Diplomacy "
+                    "with GPG encryption",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    new_p = subparsers.add_parser(
+        "new",
+        help="Create game, GM keys, and player keys",
+    )
+    new_p.add_argument("game_id", help="Unique game identifier")
+
+    play_p = subparsers.add_parser(
+        "play",
+        help="Main loop: negotiation → orders → adjudicate",
+    )
+    play_p.add_argument("game_id", help="Game identifier")
+
+    status_p = subparsers.add_parser(
+        "status",
+        help="Print current standings",
+    )
+    status_p.add_argument("game_id", help="Game identifier")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    commands = {
+        "new": cmd_new,
+        "play": cmd_play,
+        "status": cmd_status,
     }
 
-    echo "Game '$game_id' created at $gd"
-    echo "Next: perfid login $game_id"
-    ;;
-
-  login)
-    game_id=$(require_game_id "$@")
-    require_game_exists "$game_id" >/dev/null
-    ctr_name="perfid-${game_id}"
-    echo "Launching interactive Claude login in container $ctr_name..."
-    echo "Complete the login, then exit."
-    docker exec "$ctr_name" chown -R player:player /home/player/.claude 2>/dev/null || true
-    docker exec -it -u player "$ctr_name" claude login
-    echo "Login complete. Next: perfid bootstrap $game_id"
-    ;;
-
-  bootstrap)
-    game_id=$(require_game_id "$@")
-    gd=$(require_game_exists "$game_id")
-
-    echo "Bootstrapping GPG keys for game '$game_id'..."
-
-    gm_gpg="$gd/gm-gpg"
-
-    for power in "${POWERS[@]}"; do
-      echo "  Generating keys for $power..."
-      generate_player_key "$gd" "$power" "$gm_gpg"
-    done
-
-    echo "Bootstrap complete. Keys stored in $gd/keys/ and $gd/pubkeys/"
-    echo "Next: perfid play $game_id"
-    ;;
-
-  play)
-    game_id=$(require_game_id "$@")
-    gd=$(require_game_exists "$game_id")
-    ctr_name="perfid-${game_id}"
-
-    # Pre-flight: verify bootstrap was completed
-    if [[ ! -d "$gd/keys" ]]; then
-      echo "Error: keys not found. Run 'perfid bootstrap $game_id' first." >&2
-      exit 1
-    fi
-    for power in "${POWERS[@]}"; do
-      if [[ ! -f "$gd/keys/${power}.key.gpg" ]]; then
-        echo "Error: missing key for $power. Run 'perfid bootstrap $game_id' first." >&2
-        exit 1
-      fi
-    done
-
-    echo "Starting game loop for '$game_id'..."
-
-    # Main game loop
-    while true; do
-      # Route any undelivered messages from previous interrupted run
-      for power in "${POWERS[@]}"; do
-        python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from message_router import route_messages
-route_messages('$gd', '$power')
-" 2>/dev/null
-      done
-
-      # Load current state
-      phase_info=$(python3 -c "
-import sys, json
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-state = load_state('$gd')
-print(json.dumps({
-    'phase': state['phase'],
-    'year': state['year'],
-    'winner': state['winner'],
-    'eliminated': state['eliminated'],
-}))
-")
-
-      phase=$(echo "$phase_info" | python3 -c "import sys,json; print(json.load(sys.stdin)['phase'])")
-      year=$(echo "$phase_info" | python3 -c "import sys,json; print(json.load(sys.stdin)['year'])")
-      winner=$(echo "$phase_info" | python3 -c "import sys,json; print(json.load(sys.stdin)['winner'])")
-
-      # Check for winner
-      if [[ "$winner" != "None" ]] && [[ "$winner" != "null" ]]; then
-        echo ""
-        echo "=========================================="
-        echo "  GAME OVER — $winner wins!"
-        echo "=========================================="
-        python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state, format_status
-print(format_status(load_state('$gd')))
-"
-        break
-      fi
-
-      echo ""
-      echo "--- $year $phase ---"
-
-      # Log phase start
-      python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from logger import GameLogger
-logger = GameLogger('$gd')
-phase = '$phase'
-season = phase.split()[0]
-phase_type = ' '.join(phase.split()[1:]) if ' ' in phase else 'Turn'
-logger.phase_start($year, season, phase_type)
-"
-
-      case "$phase" in
-        "Spring"|"Fall")
-          # Free-form turn loop: each power takes sequential turns
-          # until all have submitted orders
-          eliminated_json=$(echo "$phase_info" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['eliminated']))")
-
-          # Build list of active powers
-          active_powers=()
-          for power in "${POWERS[@]}"; do
-            is_eliminated=$(python3 -c "
-import json
-print('$power' in json.loads('$eliminated_json'))
-")
-            [[ "$is_eliminated" == "True" ]] && continue
-            active_powers+=("$power")
-          done
-
-          # Track who has submitted (space-delimited string, bash 3.x compatible)
-          # Pre-populate from disk so interrupted games resume cleanly
-          submitted_list=""
-          for power in "${active_powers[@]}"; do
-            has_orders=$(orders_exist "$gd" "$power")
-            if [[ "$has_orders" == "true" ]]; then
-              echo "    $power already submitted orders (resuming)."
-              submitted_list="$submitted_list $power"
-            fi
-          done
-
-          # Free-form turn loop
-          max_passes=10  # Safety limit
-          pass_count=0
-          while true; do
-            all_submitted=true
-            for power in "${active_powers[@]}"; do
-              [[ " $submitted_list " == *" $power "* ]] && continue
-              all_submitted=false
-
-              echo "  $power's turn..."
-
-              # Inject GPG keys
-              if ! setup_turn_gpg "$game_id" "$power" "$gd/gm-gpg" "$gd"; then
-                echo "  FATAL: GPG setup failed for $power — aborting." >&2
-                exit 1
-              fi
-
-              # Generate turn prompt
-              prompt=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-from prompt import turn_context
-state = load_state('$gd')
-print(turn_context('$power', state, '$gd'))
-")
-
-              # Run agent with session
-              run_agent "$game_id" "$power" "$prompt" "$gd" || {
-                echo "    Warning: $power agent failed" >&2
-              }
-
-              # Route messages written by this agent and display them
-              python3 -c "
-import sys, os, tempfile, shutil, subprocess
-sys.path.insert(0, '$SCRIPT_DIR')
-from message_router import route_messages, parse_message_filename
-from gpg import decrypt_file, init_gnupghome
-from logger import TranscriptLogger
-from game_state import load_state
-
-routed = route_messages('$gd', '$power')
-gm_gpg = '$gd/gm-gpg'
-state = load_state('$gd')
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-keyrings = {}
-try:
-    for src, dest in routed:
-        parsed = parse_message_filename(os.path.basename(str(src)))
-        if not parsed:
-            continue
-        recip = parsed['recipient']
-        if recip not in keyrings:
-            key_path = os.path.join('$gd', 'keys', recip + '.key.gpg')
-            tmpdir = tempfile.mkdtemp()
-            init_gnupghome(tmpdir)
-            priv = subprocess.run(
-                ['gpg', '--batch', '--yes', '--pinentry-mode', 'loopback',
-                 '--homedir', gm_gpg, '--decrypt', key_path],
-                capture_output=True).stdout
-            subprocess.run(
-                ['gpg', '--batch', '--homedir', tmpdir, '--import'],
-                input=priv, capture_output=True)
-            keyrings[recip] = tmpdir
-        try:
-            text = decrypt_file(keyrings[recip], str(src))
-            print(f'    [{parsed[\"sender\"]} -> {recip}] {text}')
-            tl.message(parsed['sender'], recip, state['year'], state['phase'], text)
-        except Exception:
-            print(f'    [{parsed[\"sender\"]} -> {recip}] (encrypted)')
-finally:
-    for d in keyrings.values():
-        shutil.rmtree(d, ignore_errors=True)
-"
-
-              # Check if agent submitted orders
-              has_orders=$(orders_exist "$gd" "$power")
-              if [[ "$has_orders" == "true" ]]; then
-                echo "    $power submitted orders."
-                submitted_list="$submitted_list $power"
-              fi
-
-              # Cleanup GPG
-              cleanup_turn_gpg "$game_id" "$power"
-            done
-
-            if $all_submitted; then
-              break
-            fi
-
-            pass_count=$((pass_count + 1))
-            if [[ $pass_count -ge $max_passes ]]; then
-              echo "  Safety limit reached ($max_passes passes). Using default orders for remaining powers."
-              break
-            fi
-          done
-
-          # Collect and decrypt orders on host (GPG), then adjudicate
-          # inside Docker (Java/jDip)
-          echo "  Adjudicating via jDip..."
-          adj_input=$(python3 -c "
-import sys, json
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-from orders import collect_orders
-from logger import GameLogger, TranscriptLogger
-
-state = load_state('$gd')
-gm_gpg = '$gd/gm-gpg'
-
-collected = collect_orders('$gd', state['year'], state['phase'], gm_gpg, state)
-all_orders = collected['orders']
-
-if collected['defaults']:
-    print(f\"  Default orders for: {', '.join(collected['defaults'])}\", file=sys.stderr)
-if collected['errors']:
-    for power, errs in collected['errors'].items():
-        for order, msg in errs:
-            print(f\"  {power} order error: {order} — {msg}\", file=sys.stderr)
-
-# Log submitted orders
-logger = GameLogger('$gd')
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-for power, orders in all_orders.items():
-    logger.orders_submitted(power, orders, state['phase'])
-    tl.orders(power, state['year'], state['phase'], orders)
-
-# Emit state+orders for Docker-side adjudication
-print(json.dumps({'state': state, 'orders': all_orders, 'game_dir': '/game'}))
-")
-
-          # Adjudicate inside Docker (jDip needs Java)
-          adj_tmpfile=$(mktemp)
-          docker exec -i "$ctr_name" python3 -c "
-import sys, json
-sys.path.insert(0, '/perfid')
-from game_state import adjudicate, save_state
-from logger import GameLogger
-
-data = json.load(sys.stdin)
-state = adjudicate(data['state'], data['orders'], data['game_dir'])
-
-logger = GameLogger(data['game_dir'])
-order_results = state.pop('order_results', [])
-logger.adjudication_result(state['phase'], order_results)
-
-save_state(state, data['game_dir'])
-
-# Emit adjudication results for host-side transcript logging
-print(json.dumps({
-    'order_results': order_results,
-    'dislodged': state.get('dislodged', []),
-    'year': data['state']['year'],
-    'phase': data['state']['phase'],
-}))
-print(f\"  Phase advanced to: {state['year']} {state['phase']}\", file=sys.stderr)
-" <<< "$adj_input" > "$adj_tmpfile"
-
-          # Log adjudication results to transcript
-          python3 -c "
-import sys, json
-sys.path.insert(0, '$SCRIPT_DIR')
-from logger import TranscriptLogger
-
-with open('$adj_tmpfile') as f:
-    data = json.load(f)
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-tl.adjudication(data['year'], data['phase'],
-                data['order_results'], data['dislodged'])
-"
-          rm -f "$adj_tmpfile"
-          ;;
-
-        "Spring Retreat"|"Fall Retreat")
-          # Collect retreat orders from agents with dislodged units (sequential)
-          for power in "${POWERS[@]}"; do
-            is_eliminated=$(echo "$phase_info" | python3 -c "
-import sys,json
-info = json.load(sys.stdin)
-print('$power' in info['eliminated'])
-")
-            [[ "$is_eliminated" == "True" ]] && continue
-
-            # Check if this power has dislodged units
-            has_dislodged=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-state = load_state('$gd')
-dislodged = state.get('dislodged', [])
-print('true' if any(d['power'] == '$power' for d in dislodged) else 'false')
-")
-            [[ "$has_dislodged" == "false" ]] && continue
-
-            echo "  $power submitting retreats..."
-
-            if ! setup_turn_gpg "$game_id" "$power" "$gd/gm-gpg" "$gd"; then
-              echo "  FATAL: GPG setup failed for $power — aborting." >&2
-              exit 1
-            fi
-
-            prompt=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-from prompt import turn_context
-state = load_state('$gd')
-print(turn_context('$power', state, '$gd'))
-")
-
-            run_agent "$game_id" "$power" "$prompt" "$gd" || {
-              echo "    Warning: $power retreat failed" >&2
-            }
-
-            cleanup_turn_gpg "$game_id" "$power"
-          done
-
-          # Apply retreats and advance phase
-          python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state, apply_retreats, next_phase, save_state
-from orders import collect_orders
-from logger import TranscriptLogger
-
-state = load_state('$gd')
-gm_gpg = '$gd/gm-gpg'
-
-# For retreat phases, default is disband
-collected = collect_orders('$gd', state['year'], state['phase'], gm_gpg, state)
-
-# Log retreat orders to transcript
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-for power, orders in collected['orders'].items():
-    tl.orders(power, state['year'], state['phase'], orders)
-
-# Apply retreat orders
-dislodged = state.get('dislodged', [])
-retreat_orders = []
-for d in dislodged:
-    power = d['power']
-    power_orders = collected['orders'].get(power, [])
-    applied = False
-    for o in power_orders:
-        parts = o.split()
-        if len(parts) >= 4 and parts[2] == '-':
-            retreat_orders.append({
-                'power': power,
-                'unit': d['unit'],
-                'action': 'retreat',
-                'destination': ' '.join(parts[3:]),
-            })
-            applied = True
-            break
-    if not applied:
-        retreat_orders.append({
-            'power': power,
-            'unit': d['unit'],
-            'action': 'disband',
-        })
-
-state = apply_retreats(state, retreat_orders, '$gd')
-state = next_phase(state)
-save_state(state, '$gd')
-print(f\"  Phase advanced to: {state['year']} {state['phase']}\")
-"
-          ;;
-
-        "Winter Adjustment")
-          # Collect adjustment orders from agents (sequential)
-          for power in "${POWERS[@]}"; do
-            is_eliminated=$(echo "$phase_info" | python3 -c "
-import sys,json
-info = json.load(sys.stdin)
-print('$power' in info['eliminated'])
-")
-            [[ "$is_eliminated" == "True" ]] && continue
-
-            echo "  $power submitting adjustments..."
-
-            if ! setup_turn_gpg "$game_id" "$power" "$gd/gm-gpg" "$gd"; then
-              echo "  FATAL: GPG setup failed for $power — aborting." >&2
-              exit 1
-            fi
-
-            prompt=$(python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state
-from prompt import turn_context
-state = load_state('$gd')
-print(turn_context('$power', state, '$gd'))
-")
-
-            run_agent "$game_id" "$power" "$prompt" "$gd" || {
-              echo "    Warning: $power adjustment failed" >&2
-            }
-
-            cleanup_turn_gpg "$game_id" "$power"
-          done
-
-          # Apply adjustments and advance to next year
-          python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import (
-    load_state, apply_adjustments, next_phase,
-    save_state, adjustment_counts, format_status,
-)
-from orders import collect_orders
-from logger import TranscriptLogger
-
-state = load_state('$gd')
-gm_gpg = '$gd/gm-gpg'
-
-adj_counts = adjustment_counts(state)
-collected = collect_orders('$gd', state['year'], state['phase'], gm_gpg, state)
-
-# Log adjustment orders to transcript
-tl = TranscriptLogger('$GAMES_DIR', '$game_id')
-for power, orders in collected['orders'].items():
-    tl.orders(power, state['year'], state['phase'], orders)
-
-adjustments = {}
-for power, count in adj_counts.items():
-    if count == 0:
-        continue
-    power_orders = collected['orders'].get(power, [])
-    actions = []
-    for o in power_orders:
-        parts = o.split()
-        if 'Build' in o or 'build' in o:
-            unit_type = 'Army' if parts[1].upper() in ('A', 'ARMY') else 'Fleet'
-            location = ' '.join(parts[2:])
-            actions.append({
-                'action': 'build',
-                'unit': {'type': unit_type, 'location': location},
-            })
-        elif 'Disband' in o or 'disband' in o or 'Remove' in o or 'remove' in o:
-            unit_type = 'Army' if parts[1].upper() in ('A', 'ARMY') else 'Fleet'
-            location = ' '.join(parts[2:])
-            actions.append({
-                'action': 'disband',
-                'unit': {'type': unit_type, 'location': location},
-            })
-    if actions:
-        adjustments[power] = actions
-
-state = apply_adjustments(state, adjustments, '$gd')
-state = next_phase(state)
-save_state(state, '$gd')
-
-print(format_status(state))
-print(f\"  Next year: {state['year']} {state['phase']}\")
-"
-          ;;
-
-        *)
-          echo "Error: unexpected phase '$phase'" >&2
-          exit 1
-          ;;
-      esac
-
-      # Archive messages after each phase
-      python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from message_router import archive_phase
-archive_phase('$gd', $year, '$(echo "$phase" | tr ' ' '_')')
-" 2>/dev/null || true
-
-    done
-    ;;
-
-  status)
-    game_id=$(require_game_id "$@")
-    gd=$(require_game_exists "$game_id")
-
-    python3 -c "
-import sys
-sys.path.insert(0, '$SCRIPT_DIR')
-from game_state import load_state, format_status
-state = load_state('$gd')
-print(format_status(state))
-"
-    ;;
-
-  destroy)
-    game_id=$(require_game_id "$@")
-    gd=$(require_game_exists "$game_id")
-
-    echo "Destroying game '$game_id'..."
-
-    # Tear down single Docker container
-    ctr_name="perfid-${game_id}"
-    echo "  Removing container: $ctr_name"
-    docker rm -f "$ctr_name" 2>/dev/null || true
-
-    # Remove named volume for sessions
-    echo "  Removing session volume: perfid-sessions-${game_id}"
-    docker volume rm "perfid-sessions-${game_id}" 2>/dev/null || true
-
-    # Optionally remove game directory
-    if [[ -d "$gd" ]]; then
-      printf "Delete game directory %s? [y/N] " "$gd"
-      read -r answer
-      if [[ "$answer" =~ ^[Yy]$ ]]; then
-        rm -rf "$gd"
-        echo "Game directory deleted."
-      else
-        echo "Game directory kept at $gd"
-      fi
-    fi
-
-    echo "Game '$game_id' destroyed."
-    ;;
-
-  *)
-    usage
-    ;;
-esac
+    try:
+        commands[args.command](args)
+    except PerfidError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

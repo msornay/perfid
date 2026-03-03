@@ -6,7 +6,6 @@ Diplomacy, use GPG encryption, and interact with the game filesystem.
 
 Prompt types:
   - system_prompt: one-time rules, GPG workflow, file layout
-  - bootstrap_prompt: generate GPG key, publish public key
   - season_turn_prompt: free-form turn (negotiate + submit orders)
   - retreat_prompt: choose retreat destinations or disband
   - adjustment_prompt: choose builds/disbands for winter
@@ -22,7 +21,6 @@ from game_state import (
     state_for_power,
 )
 from message_router import list_inbox
-from orders import has_submitted
 
 
 def _format_units(units):
@@ -97,31 +95,6 @@ def _format_dislodged(dislodged, power):
         lines.append(
             f"  {u['type']} {u['location']} — "
             f"can retreat to: {retreat_str}"
-        )
-    return "\n".join(lines)
-
-
-def _format_submitted(game_dir, state):
-    """Format which powers have already submitted orders."""
-    year = state["year"]
-    phase = state["phase"]
-    submitted = []
-    pending = []
-    for power in POWERS:
-        if power in state.get("eliminated", []):
-            continue
-        if has_submitted(game_dir, power, year, phase):
-            submitted.append(power)
-        else:
-            pending.append(power)
-    lines = []
-    if submitted:
-        lines.append(
-            f"  Submitted: {', '.join(submitted)}"
-        )
-    if pending:
-        lines.append(
-            f"  Pending: {', '.join(pending)}"
         )
     return "\n".join(lines)
 
@@ -317,77 +290,11 @@ def system_prompt(power):
     )
 
 
-BOOTSTRAP_PROMPT = """\
-# Bootstrap: Generate Your GPG Key
+NEGOTIATION_PROMPT = """\
+# {phase} {year} — Negotiation Round {round_num}/3
 
-This is the bootstrap phase. You need to:
-
-1. **Generate your GPG key pair**:
-   ```
-   gpg --batch --gen-key <<KEYEOF
-   Key-Type: RSA
-   Key-Length: 2048
-   Name-Real: {power}
-   Name-Email: {power_lower}@perfid.local
-   Expire-Date: 0
-   %no-protection
-   %commit
-   KEYEOF
-   ```
-
-2. **Export your public key**:
-   ```
-   gpg --armor --export {power_lower}@perfid.local > /tmp/{power}.asc
-   ```
-
-3. **Publish it** by writing to the shared pubkeys directory:
-   ```
-   cp /tmp/{power}.asc pubkeys/{power}.asc
-   ```
-
-4. **Import all other public keys** from `pubkeys/`:
-   ```
-   for f in pubkeys/*.asc; do
-       gpg --import "$f"
-   done
-   ```
-
-5. **Trust all imported keys**:
-   ```
-   for f in pubkeys/*.asc; do
-       FP=$(gpg --with-colons --fingerprint --import-options import-show \\
-            --dry-run --import "$f" 2>/dev/null | grep fpr | head -1 | \\
-            cut -d: -f10)
-       echo "$FP:5:" | gpg --import-ownertrust
-   done
-   ```
-
-After completing these steps, confirm by listing your keyring:
-```
-gpg --list-keys
-```
-"""
-
-
-def bootstrap_prompt(power):
-    """Generate the bootstrap prompt for key generation.
-
-    Args:
-        power: Diplomacy power name.
-
-    Returns:
-        Bootstrap prompt string.
-    """
-    return BOOTSTRAP_PROMPT.format(
-        power=power,
-        power_lower=power.lower(),
-    )
-
-
-SEASON_TURN_PROMPT = """\
-# {phase} {year} — Your Turn
-
-**Year**: {year} | **Phase**: {phase}
+**Year**: {year} | **Phase**: {phase} | **Round**: {round_num} of 3 \
+(negotiation only)
 
 ## Current Board Position
 
@@ -406,12 +313,10 @@ SEASON_TURN_PROMPT = """\
 ## Your Inbox
 {inbox}
 
-## Order Submission Status
-{submitted_status}
-
 ## Instructions
 
-This is a **free-form turn**. You may:
+This is **negotiation round {round_num}/3**. You cannot submit orders \
+yet. Use this round to:
 
 1. **Read** any messages in your inbox by decrypting them:
    ```
@@ -422,13 +327,61 @@ This is a **free-form turn**. You may:
    ```
    echo "Your message here" | gpg --armor --encrypt --trust-model always \\
        --recipient <recipient>@perfid.local \\
-       --output messages/outbox/{power}/{power}-to-<Recipient>-{phase_label}-r1-<seq>.gpg
+       --output messages/outbox/{power}/{power}-to-<Recipient>-{phase_label}-r{round_num}-<seq>.gpg
    ```
 
 3. **Use jDip** to simulate order combinations and test strategies.
 
-4. **Submit your final orders** when ready. Once submitted, your turn \
-is done for this season.
+4. **Plan your strategy.** Think about alliances, threats, and openings.
+
+**Your goal is 18 SCs — solo victory.** Think carefully about:
+- Who to ally with and what to propose
+- What are your opponents likely planning?
+- Which supply centers can you take this year?
+- Who is the biggest threat to reach 18 first?
+"""
+
+SEASON_TURN_PROMPT = """\
+# {phase} {year} — Round {round_num}
+
+**Year**: {year} | **Phase**: {phase} | **Round**: {round_num}
+
+## Current Board Position
+
+### Units
+{all_units}
+
+### Supply Center Ownership
+{sc_ownership}
+
+### Your Position
+- **Power**: {power}
+- **Your units**:
+{your_units}
+- **Your SCs**: {your_sc_count}
+
+## Your Inbox
+{inbox}
+
+## Instructions
+
+You may negotiate, simulate strategies, and **submit your final orders**.
+
+1. **Read** any messages in your inbox by decrypting them:
+   ```
+   gpg --decrypt messages/inbox/{power}/<filename>.gpg
+   ```
+
+2. **Send messages** to negotiate with other powers:
+   ```
+   echo "Your message here" | gpg --armor --encrypt --trust-model always \\
+       --recipient <recipient>@perfid.local \\
+       --output messages/outbox/{power}/{power}-to-<Recipient>-{phase_label}-r{round_num}-<seq>.gpg
+   ```
+
+3. **Use jDip** to simulate order combinations and test strategies.
+
+4. **Submit your final orders** when ready:
 
 ### Order format
 Write your orders as a JSON object and encrypt with the GM's public key:
@@ -436,7 +389,7 @@ Write your orders as a JSON object and encrypt with the GM's public key:
 ```bash
 cat <<'ORDERS' | gpg --armor --encrypt --trust-model always \\
     --recipient gm@perfid.local \\
-    --output orders/{year}/{phase_label}/{power}.gpg
+    --output {dropbox}/{power}.gpg
 {{
   "power": "{power}",
   "year": {year},
@@ -468,16 +421,21 @@ ORDERS
 """
 
 
-def season_turn_prompt(power, state, game_dir):
-    """Generate the free-form season turn prompt.
+def season_turn_prompt(power, state, game_dir, round_num=1,
+                       dropbox=None):
+    """Generate the season turn prompt.
 
-    Replaces the separate negotiation and order prompts. On each
-    call the agent can negotiate, simulate, or submit orders.
+    In negotiation rounds (round_num <= 3), generates a
+    negotiation-only prompt. In later rounds, includes order
+    submission instructions pointing to the dropbox.
 
     Args:
         power: Diplomacy power name.
         state: Current game state dict.
         game_dir: Path to game directory.
+        round_num: Current round number (1-indexed).
+        dropbox: Path to the power's order dropbox directory.
+            Required when round_num > 3.
 
     Returns:
         Season turn prompt string.
@@ -487,6 +445,22 @@ def season_turn_prompt(power, state, game_dir):
     pview = state_for_power(state, power)
 
     inbox = list_inbox(game_dir, power)
+
+    common = dict(
+        power=power,
+        year=state["year"],
+        phase=phase,
+        phase_label=phase_label,
+        round_num=round_num,
+        all_units=_format_all_units(state),
+        sc_ownership=_format_sc_ownership(state),
+        your_units=_format_units(pview["your_units"]),
+        your_sc_count=pview["your_sc_count"],
+        inbox=_format_inbox(inbox),
+    )
+
+    if round_num <= 3:
+        return NEGOTIATION_PROMPT.format(**common)
 
     # Build example orders from the power's actual units
     example_lines = []
@@ -499,17 +473,11 @@ def season_turn_prompt(power, state, game_dir):
         else '    "Waive"'
     )
 
+    dropbox_path = dropbox or f"/tmp/orders-{power.lower()}"
+
     return SEASON_TURN_PROMPT.format(
-        power=power,
-        year=state["year"],
-        phase=phase,
-        phase_label=phase_label,
-        all_units=_format_all_units(state),
-        sc_ownership=_format_sc_ownership(state),
-        your_units=_format_units(pview["your_units"]),
-        your_sc_count=pview["your_sc_count"],
-        inbox=_format_inbox(inbox),
-        submitted_status=_format_submitted(game_dir, state),
+        **common,
+        dropbox=dropbox_path,
         example_orders=example_orders,
     )
 
@@ -541,7 +509,7 @@ GM's public key:
 ```bash
 cat <<'ORDERS' | gpg --armor --encrypt --trust-model always \\
     --recipient gm@perfid.local \\
-    --output orders/{year}/{phase_label}/{power}.gpg
+    --output {dropbox}/{power}.gpg
 {{
   "power": "{power}",
   "year": {year},
@@ -568,13 +536,14 @@ will be **automatically disbanded**.
 """
 
 
-def retreat_prompt(power, state, game_dir):
+def retreat_prompt(power, state, game_dir, dropbox=None):
     """Generate the retreat prompt for dislodged units.
 
     Args:
         power: Diplomacy power name.
         state: Current game state dict.
         game_dir: Path to game directory.
+        dropbox: Path to the power's order dropbox directory.
 
     Returns:
         Retreat prompt string.
@@ -582,6 +551,7 @@ def retreat_prompt(power, state, game_dir):
     phase = state["phase"]
     phase_label = phase.replace(" ", "_")
     dislodged = state.get("dislodged", [])
+    dropbox_path = dropbox or f"/tmp/orders-{power.lower()}"
 
     return RETREAT_PROMPT.format(
         power=power,
@@ -590,6 +560,7 @@ def retreat_prompt(power, state, game_dir):
         phase_label=phase_label,
         all_units=_format_all_units(state),
         dislodged=_format_dislodged(dislodged, power),
+        dropbox=dropbox_path,
     )
 
 
@@ -627,7 +598,7 @@ GM's public key:
 ```bash
 cat <<'ORDERS' | gpg --armor --encrypt --trust-model always \\
     --recipient gm@perfid.local \\
-    --output orders/{year}/Winter_Adjustment/{power}.gpg
+    --output {dropbox}/{power}.gpg
 {{
   "power": "{power}",
   "year": {year},
@@ -641,13 +612,14 @@ ORDERS
 """
 
 
-def adjustment_prompt(power, state, game_dir):
+def adjustment_prompt(power, state, game_dir, dropbox=None):
     """Generate the winter adjustment prompt.
 
     Args:
         power: Diplomacy power name.
         state: Current game state dict.
         game_dir: Path to game directory.
+        dropbox: Path to the power's order dropbox directory.
 
     Returns:
         Adjustment prompt string.
@@ -744,6 +716,8 @@ def adjustment_prompt(power, state, game_dir):
     else:
         example_orders = '    "Waive"'
 
+    dropbox_path = dropbox or f"/tmp/orders-{power.lower()}"
+
     return ADJUSTMENT_PROMPT.format(
         power=power,
         year=state["year"],
@@ -756,6 +730,7 @@ def adjustment_prompt(power, state, game_dir):
         sc_ownership=_format_sc_ownership(state),
         adjustment_instructions=adjustment_instructions,
         example_orders=example_orders,
+        dropbox=dropbox_path,
     )
 
 
@@ -829,7 +804,8 @@ def _disband_instructions(power, units, diff):
     return "\n".join(lines)
 
 
-def turn_context(power, state, game_dir):
+def turn_context(power, state, game_dir, round_num=None,
+                 dropbox=None):
     """Generate the appropriate per-turn prompt based on phase.
 
     Dispatches to the correct prompt generator based on the game
@@ -839,6 +815,8 @@ def turn_context(power, state, game_dir):
         power: Diplomacy power name.
         state: Current game state dict.
         game_dir: Path to game directory.
+        round_num: For movement phases, the current round number.
+        dropbox: For movement phases, the order dropbox path.
 
     Returns:
         Turn-specific prompt string.
@@ -846,12 +824,16 @@ def turn_context(power, state, game_dir):
     phase = Phase(state["phase"])
 
     if phase in (Phase.SPRING, Phase.FALL):
-        return season_turn_prompt(power, state, game_dir)
+        return season_turn_prompt(
+            power, state, game_dir,
+            round_num=round_num or 4,
+            dropbox=dropbox,
+        )
 
     if phase in (Phase.SPRING_RETREAT, Phase.FALL_RETREAT):
-        return retreat_prompt(power, state, game_dir)
+        return retreat_prompt(power, state, game_dir, dropbox=dropbox)
 
     if phase == Phase.WINTER_ADJUSTMENT:
-        return adjustment_prompt(power, state, game_dir)
+        return adjustment_prompt(power, state, game_dir, dropbox=dropbox)
 
     raise ValueError(f"Unknown phase: {phase}")

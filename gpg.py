@@ -6,7 +6,9 @@ GM and agent keyrings stay separate.
 """
 
 import os
+import shutil
 import subprocess
+import tempfile
 
 
 # 7 Diplomacy powers
@@ -208,58 +210,59 @@ def decrypt_file(gnupghome, input_path):
     return result.stdout.decode()
 
 
-def setup_gm_keys(game_dir):
-    """Generate GM keys for a new game.
+def generate_player_key(game_dir, power, gm_gnupghome):
+    """Generate a player key pair, encrypt private key with GM key.
 
-    Creates the GM keyring in game_dir/gm-keyring/ and exports the
-    public key to game_dir/pubkeys/GM.asc.
-
-    Returns:
-        Tuple of (gm_gnupghome, gm_fingerprint).
-    """
-    gm_home = os.path.join(game_dir, "gm-keyring")
-    pubkeys_dir = os.path.join(game_dir, "pubkeys")
-    os.makedirs(pubkeys_dir, exist_ok=True)
-
-    fingerprint = generate_key(gm_home, "GM", "gm@perfid.local")
-    pub_key = export_public_key(gm_home, "gm@perfid.local")
-
-    pubkey_path = os.path.join(pubkeys_dir, "GM.asc")
-    with open(pubkey_path, "w") as f:
-        f.write(pub_key)
-
-    return gm_home, fingerprint
-
-
-def setup_agent_keys(gnupghome, power):
-    """Generate keys for an agent (called inside the agent's container).
-
-    Args:
-        gnupghome: Agent's private GPG home (inside container).
-        power: Diplomacy power name (e.g. "England").
-
-    Returns:
-        Tuple of (fingerprint, public_key_armor).
-    """
-    email = f"{power.lower()}@perfid.local"
-    fingerprint = generate_key(gnupghome, power, email)
-    pub_key = export_public_key(gnupghome, email)
-    return fingerprint, pub_key
-
-
-def publish_agent_key(game_dir, power, pub_key_armor):
-    """Write an agent's public key to the shared pubkeys directory.
+    Creates a temporary keyring, generates the player's key pair,
+    exports the private key encrypted with the GM's public key
+    (stored in keys/{power}.key.gpg), and exports the public key
+    (stored in pubkeys/{power}.asc).
 
     Args:
         game_dir: Path to the game directory.
-        power: Diplomacy power name.
-        pub_key_armor: ASCII-armored public key string.
+        power: Diplomacy power name (e.g. "England").
+        gm_gnupghome: Path to GM's GPG home (has GM private+public key).
+
+    Returns:
+        Path to the encrypted private key file.
     """
-    pubkeys_dir = os.path.join(game_dir, "pubkeys")
-    os.makedirs(pubkeys_dir, exist_ok=True)
-    path = os.path.join(pubkeys_dir, f"{power}.asc")
-    with open(path, "w") as f:
-        f.write(pub_key_armor)
+    tmpdir = tempfile.mkdtemp()
+    try:
+        key_email = f"{power.lower()}@perfid.local"
+
+        # Generate key in temp keyring
+        generate_key(tmpdir, power, key_email)
+
+        # Export private key (ASCII-armored)
+        result = _run_gpg(
+            ["--armor", "--export-secret-keys", key_email],
+            tmpdir,
+        )
+        private_key = result.stdout
+
+        # Encrypt private key with GM's public key
+        keys_dir = os.path.join(game_dir, "keys")
+        os.makedirs(keys_dir, exist_ok=True)
+        encrypted_path = os.path.join(keys_dir, f"{power}.key.gpg")
+        _run_gpg(
+            ["--armor", "--encrypt", "--trust-model", "always",
+             "--recipient", "gm@perfid.local",
+             "--output", encrypted_path],
+            gm_gnupghome,
+            input_data=private_key,
+        )
+
+        # Export public key
+        pub_key = export_public_key(tmpdir, key_email)
+        pubkeys_dir = os.path.join(game_dir, "pubkeys")
+        os.makedirs(pubkeys_dir, exist_ok=True)
+        pubkey_path = os.path.join(pubkeys_dir, f"{power}.asc")
+        with open(pubkey_path, "w") as f:
+            f.write(pub_key)
+
+        return encrypted_path
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def import_all_pubkeys(gnupghome, game_dir):

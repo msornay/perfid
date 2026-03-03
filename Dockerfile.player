@@ -2,18 +2,25 @@ FROM node:20-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       gnupg python3 default-jre-headless \
+       gnupg python3 default-jre-headless sudo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
 
-# GPG wrapper that logs plaintext before encrypting
-RUN mv /usr/bin/gpg /usr/bin/gpg.real
-COPY gpg-wrapper.sh /usr/bin/gpg
-RUN chmod +x /usr/bin/gpg
+# Create unprivileged player user; allow root to sudo as player
+RUN useradd -m player \
+    && echo "root ALL=(player) NOPASSWD: ALL" >> /etc/sudoers
 
-RUN useradd -m player
+# Copy perfid Python modules into the container
+COPY *.py /perfid/
+COPY perfid /perfid/perfid
+RUN chmod +x /perfid/perfid
 
-WORKDIR /game
+# Copy jDip
+COPY jdip/ /perfid/jdip/
 
-CMD ["sleep", "infinity"]
+WORKDIR /games
+
+# Container runs perfid directly (no Docker-from-Docker)
+ENTRYPOINT ["python3", "/perfid/perfid"]
+CMD ["--help"]
