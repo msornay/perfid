@@ -11,6 +11,7 @@ user via subprocess.run(['sudo', '-u', 'player', ...]).
 import json
 import os
 import random
+import signal
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,18 @@ CREDENTIALS_SRC = "/root/.claude-credentials"
 class PerfidError(Exception):
     """Clean error messages for the CLI."""
     pass
+
+
+def _sigterm_handler(signum, frame):
+    """Convert SIGTERM into KeyboardInterrupt.
+
+    Docker sends SIGTERM on container stop. Raising KeyboardInterrupt
+    lets the game loop exit through the same cleanup path as Ctrl+C.
+    """
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 def _remove_stale_gpg_sockets(gpg_dir):
@@ -324,10 +337,17 @@ def run_agent(ctx, power, prompt, env_extra=None):
 
     _log(logger, "agent_start", power=power, session=session_id)
 
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
     )
-    output = result.stdout
+    try:
+        output, _ = proc.communicate()
+    except KeyboardInterrupt:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    returncode = proc.returncode
 
     if not started:
         mark_session_started(game_dir, power)
@@ -350,10 +370,10 @@ def run_agent(ctx, power, prompt, env_extra=None):
     _log(logger, "agent_done", power=power,
          submitted_orders=False)  # updated by caller
 
-    if result.returncode != 0:
+    if returncode != 0:
         raise PerfidError(
             f"Agent for {power} exited with code "
-            f"{result.returncode}"
+            f"{returncode}"
         )
 
     return True

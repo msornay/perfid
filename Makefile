@@ -63,7 +63,7 @@ new:
 # Run the game loop (runs inside container)
 play:
 	@test -n "$(GAME)" || { echo "Usage: make play GAME=<game-id>"; exit 1; }
-	docker run --rm -it \
+	docker run --rm -it --init \
 		-v "$$(cd perfid-games && pwd):/games" \
 		-v "perfid-sessions-$(GAME):/home/player/.claude" \
 		-e PERFID_GAMES_DIR=/games \

@@ -93,6 +93,17 @@ def mock_subprocess_with_output(output):
     return _mock
 
 
+def mock_popen_factory(stdout="", returncode=0):
+    """Create a mock Popen constructor for run_agent tests."""
+    def _mock_popen(cmd, **kwargs):
+        proc = MagicMock()
+        proc.communicate.return_value = (stdout, "")
+        proc.returncode = returncode
+        proc.pid = 99999
+        return proc
+    return _mock_popen
+
+
 # --- Tests: Active powers ---
 
 
@@ -192,46 +203,42 @@ class TestCleanupTurnGpg:
 
 
 class TestRunAgent:
-    @patch("game_loop.subprocess.run")
-    def test_first_call_uses_session_id(self, mock_run, ctx, game_dir):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="agent output", stderr=""
-        )
+    """Tests for run_agent.
+
+    We mock both subprocess.Popen (used by run_agent for the claude
+    call) and gpg_mod.encrypt (to prevent GPG's subprocess.run from
+    also going through the mocked Popen).
+    """
+
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_first_call_uses_session_id(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        mock_popen.side_effect = mock_popen_factory("agent output")
         game_loop.run_agent(ctx, "England", "test prompt")
-        # Verify claude was called with --session-id
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        assert len(agent_calls) == 1
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         assert "--session-id" in cmd
 
-    @patch("game_loop.subprocess.run")
-    def test_subsequent_call_uses_resume(self, mock_run, ctx, game_dir):
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_subsequent_call_uses_resume(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
         from game_state import mark_session_started, get_session_id
         get_session_id(game_dir, "England")
         mark_session_started(game_dir, "England")
 
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="agent output", stderr=""
-        )
+        mock_popen.side_effect = mock_popen_factory("agent output")
         game_loop.run_agent(ctx, "England", "test prompt")
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        assert len(agent_calls) == 1
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         assert "--resume" in cmd
 
-    @patch("game_loop.subprocess.run")
+    @patch("game_loop.subprocess.Popen")
     def test_agent_output_encrypted_and_logged(
-        self, mock_run, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="secret strategy", stderr=""
-        )
+        mock_popen.side_effect = mock_popen_factory("secret strategy")
         game_loop.run_agent(ctx, "France", "prompt")
 
         log_path = os.path.join(game_dir, "log.jsonl")
@@ -247,66 +254,53 @@ class TestRunAgent:
         enc = evt.get("encrypted_output", "")
         assert "BEGIN PGP MESSAGE" in enc or enc == "(encryption failed)"
 
-    @patch("game_loop.subprocess.run")
-    def test_agent_called_with_sudo(self, mock_run, ctx, game_dir):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output", stderr=""
-        )
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_agent_called_with_sudo(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "Germany", "prompt")
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        assert len(agent_calls) == 1
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         assert cmd[0] == "sudo"
         assert "-u" in cmd
         assert "player" in cmd
 
-    @patch("game_loop.subprocess.run")
-    def test_agent_gnupghome_set(self, mock_run, ctx, game_dir):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output", stderr=""
-        )
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_agent_gnupghome_set(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "Italy", "prompt")
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         gnupghome_arg = [a for a in cmd if "GNUPGHOME=" in a]
         assert len(gnupghome_arg) == 1
         assert "gpg-italy" in gnupghome_arg[0]
 
-    @patch("game_loop.subprocess.run")
-    def test_agent_game_dir_env(self, mock_run, ctx, game_dir):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output", stderr=""
-        )
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_agent_game_dir_env(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "England", "prompt")
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         game_dir_arg = [a for a in cmd if "PERFID_GAME_DIR=" in a]
         assert len(game_dir_arg) == 1
         assert game_dir in game_dir_arg[0]
 
-    @patch("game_loop.subprocess.run")
-    def test_agent_env_extra_passed(self, mock_run, ctx, game_dir):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="output", stderr=""
-        )
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_agent_env_extra_passed(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(
             ctx, "France", "prompt",
             env_extra={"PERFID_DROPBOX": "/tmp/orders-france"},
         )
-        agent_calls = [
-            c for c in mock_run.call_args_list
-            if any("claude" in str(a) for a in c.args[0])
-        ]
-        cmd = agent_calls[0].args[0]
+        cmd = mock_popen.call_args.args[0]
         dropbox_arg = [a for a in cmd if "PERFID_DROPBOX=" in a]
         assert len(dropbox_arg) == 1
         assert "/tmp/orders-france" in dropbox_arg[0]
@@ -340,11 +334,12 @@ class TestRouteAndLogMessages:
 
 
 class TestMovementPhase:
+    @patch("game_loop.adjudicate_movement")
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
     def test_all_powers_get_turns(
-        self, mock_cleanup, mock_setup, mock_agent,
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
         ctx, state, game_dir
     ):
         mock_agent.return_value = True
@@ -367,11 +362,12 @@ class TestMovementPhase:
         assert mock_setup.call_count >= 7
         assert mock_cleanup.call_count >= 7
 
+    @patch("game_loop.adjudicate_movement")
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
     def test_negotiation_rounds_before_orders(
-        self, mock_cleanup, mock_setup, mock_agent,
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
         ctx, state, game_dir
     ):
         """Powers should play at least MIN_NEGOTIATION_ROUNDS rounds."""
@@ -403,11 +399,12 @@ class TestMovementPhase:
             assert min(round_nums) == 1
             assert max(round_nums) >= 4
 
+    @patch("game_loop.adjudicate_movement")
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
     def test_eliminated_powers_skipped(
-        self, mock_cleanup, mock_setup, mock_agent,
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
         ctx, state, game_dir
     ):
         mock_agent.return_value = True
@@ -430,11 +427,12 @@ class TestMovementPhase:
         assert "Austria" not in setup_powers
         assert "Turkey" not in setup_powers
 
+    @patch("game_loop.adjudicate_movement")
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
     def test_safety_limit_reached(
-        self, mock_cleanup, mock_setup, mock_agent,
+        self, mock_cleanup, mock_setup, mock_agent, mock_adj,
         ctx, state, game_dir
     ):
         """No submissions → safety limit stops the loop."""
