@@ -1,4 +1,4 @@
-.PHONY: test test-local test-full-game lint lint-local build new play status destroy
+.PHONY: test test-local test-full-game lint lint-local build login new play status destroy
 
 PLAYER_IMAGE ?= perfid-player
 
@@ -30,6 +30,25 @@ lint-local:
 
 build:
 	docker build -f Dockerfile.player -t $(PLAYER_IMAGE) .
+
+# Authenticate claude CLI and bake credentials into the image.
+# Runs claude as player, copies resulting credentials to
+# /root/.claude-credentials (where game_loop re-injects them
+# each turn after decrypting per-power memory).
+login:
+	@docker image inspect $(PLAYER_IMAGE) >/dev/null 2>&1 || $(MAKE) build
+	@ctr=$$(docker create -it --entrypoint "" $(PLAYER_IMAGE) \
+		sh -c 'sudo -u player claude && \
+			mkdir -p /root/.claude-credentials && \
+			cp -a /home/player/.claude/. /root/.claude-credentials/') && \
+	docker start -ai "$$ctr" && \
+	docker commit \
+		--change 'ENTRYPOINT ["python3", "/perfid/perfid"]' \
+		--change 'CMD ["--help"]' \
+		--change 'WORKDIR /games' \
+		"$$ctr" $(PLAYER_IMAGE) >/dev/null && \
+	docker rm "$$ctr" >/dev/null && \
+	echo "Credentials baked into $(PLAYER_IMAGE)."
 
 # Create a new game (runs inside container)
 new:

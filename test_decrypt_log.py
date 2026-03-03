@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 
 import pytest
 
@@ -17,8 +18,47 @@ def gm_home(tmp_path):
     return home
 
 
+@pytest.fixture
+def keys_dir(tmp_path, gm_home):
+    """Keys directory with GM-encrypted recipient private keys."""
+    kdir = str(tmp_path / "keys")
+    os.makedirs(kdir)
+    return kdir
+
+
+def _make_recipient_key(tmp_path, gm_home, keys_dir, power):
+    """Generate a recipient key and store GM-encrypted private key."""
+    email = f"{power.lower()}@perfid.local"
+    tmp_keyring = str(tmp_path / f"tmp-{power.lower()}")
+    gpg.generate_key(tmp_keyring, power, email)
+
+    # Export public key for encrypting test messages
+    pub = gpg.export_public_key(tmp_keyring, email)
+
+    # Export private key and encrypt with GM key
+    from subprocess import run
+    result = run(
+        ["gpg", "--batch", "--yes", "--homedir", tmp_keyring,
+         "--armor", "--export-secret-keys", email],
+        capture_output=True, check=True,
+    )
+    private_key = result.stdout
+
+    enc_path = os.path.join(keys_dir, f"{power}.key.gpg")
+    gpg.gpg_mod = gpg  # self-reference sanity
+    run(
+        ["gpg", "--batch", "--yes", "--homedir", gm_home,
+         "--armor", "--encrypt", "--trust-model", "always",
+         "--recipient", "gm@perfid.local",
+         "--output", enc_path],
+        input=private_key, check=True, capture_output=True,
+    )
+
+    return tmp_keyring, pub
+
+
 class TestDecryptEvent:
-    def test_decrypt_agent_turn(self, gm_home):
+    def test_decrypt_agent_turn(self, gm_home, keys_dir):
         plaintext = "Strategy: attack from the south"
         ct = gpg.encrypt(gm_home, plaintext, "gm@perfid.local")
         event = {
@@ -26,38 +66,51 @@ class TestDecryptEvent:
             "power": "France",
             "encrypted_output": ct,
         }
-        result = decrypt_event(event, gm_home)
+        result = decrypt_event(event, gm_home, keys_dir, {})
         assert result["output"] == plaintext
         assert "encrypted_output" not in result
 
-    def test_decrypt_message_routed(self, gm_home):
+    def test_decrypt_message_routed(self, tmp_path, gm_home, keys_dir):
+        """Messages encrypted to recipient are decrypted via keys dir."""
+        eng_keyring, eng_pub = _make_recipient_key(
+            tmp_path, gm_home, keys_dir, "England",
+        )
+        # Import England's public key into a sender keyring to encrypt
+        sender_keyring = str(tmp_path / "sender")
+        gpg.generate_key(sender_keyring, "France", "france@perfid.local")
+        gpg.import_and_trust(sender_keyring, eng_pub)
+
         plaintext = "Let's ally against Germany"
-        ct = gpg.encrypt(gm_home, plaintext, "gm@perfid.local")
+        ct = gpg.encrypt(
+            sender_keyring, plaintext, "england@perfid.local",
+        )
         event = {
             "event": "message_routed",
             "sender": "France",
             "recipient": "England",
             "encrypted": ct,
         }
-        result = decrypt_event(event, gm_home)
+        cache = {}
+        result = decrypt_event(event, gm_home, keys_dir, cache)
         assert result["plaintext"] == plaintext
         assert "encrypted" not in result
+        assert "England" in cache  # key was cached
 
-    def test_passthrough_non_encrypted(self, gm_home):
+    def test_passthrough_non_encrypted(self, gm_home, keys_dir):
         event = {
             "event": "phase_start",
             "year": 1901,
             "phase": "Spring",
         }
-        result = decrypt_event(event, gm_home)
+        result = decrypt_event(event, gm_home, keys_dir, {})
         assert result == event
 
-    def test_passthrough_unknown_event(self, gm_home):
+    def test_passthrough_unknown_event(self, gm_home, keys_dir):
         event = {"event": "custom", "data": "hello"}
-        result = decrypt_event(event, gm_home)
+        result = decrypt_event(event, gm_home, keys_dir, {})
         assert result == event
 
-    def test_decrypt_error_preserved(self, tmp_path, gm_home):
+    def test_decrypt_error_preserved(self, tmp_path, gm_home, keys_dir):
         """Wrong key produces a decrypt_error field."""
         other_home = str(tmp_path / "other")
         gpg.generate_key(other_home, "Other", "other@test.local")
@@ -67,17 +120,40 @@ class TestDecryptEvent:
             "power": "X",
             "encrypted_output": ct,
         }
-        result = decrypt_event(event, gm_home)
+        result = decrypt_event(event, gm_home, keys_dir, {})
         assert "decrypt_error" in result
         assert "encrypted_output" in result  # kept on failure
 
+    def test_message_no_key_available(self, gm_home, keys_dir):
+        """Missing recipient key produces a decrypt_error."""
+        event = {
+            "event": "message_routed",
+            "sender": "France",
+            "recipient": "NoSuchPower",
+            "encrypted": "-----BEGIN PGP MESSAGE-----\nfoo",
+        }
+        result = decrypt_event(event, gm_home, keys_dir, {})
+        assert "decrypt_error" in result
+        assert "encrypted" in result  # kept on failure
+
 
 class TestDecryptLog:
-    def test_full_roundtrip(self, gm_home, tmp_path):
+    def test_full_roundtrip(self, tmp_path, gm_home, keys_dir):
         plaintext1 = "Austria strategy"
         ct1 = gpg.encrypt(gm_home, plaintext1, "gm@perfid.local")
+
+        # Create England key for message decryption
+        eng_keyring, eng_pub = _make_recipient_key(
+            tmp_path, gm_home, keys_dir, "England",
+        )
+        sender_keyring = str(tmp_path / "sender")
+        gpg.generate_key(sender_keyring, "France", "france@perfid.local")
+        gpg.import_and_trust(sender_keyring, eng_pub)
+
         plaintext2 = "Propose alliance"
-        ct2 = gpg.encrypt(gm_home, plaintext2, "gm@perfid.local")
+        ct2 = gpg.encrypt(
+            sender_keyring, plaintext2, "england@perfid.local",
+        )
 
         log_path = str(tmp_path / "game.jsonl")
         with open(log_path, "w") as f:
@@ -98,7 +174,7 @@ class TestDecryptLog:
             }) + "\n")
 
         output = io.StringIO()
-        count = decrypt_log(log_path, gm_home, output=output)
+        count = decrypt_log(log_path, gm_home, keys_dir, output=output)
 
         assert count == 2
 
@@ -128,9 +204,10 @@ class TestDecryptLog:
             }) + "\n")
 
         gm_home = str(tmp_path / "no-such-dir")
+        keys_dir = str(tmp_path / "no-keys")
         output = io.StringIO()
         # Should not raise — errors are captured per-event
-        count = decrypt_log(log_path, gm_home, output=output)
+        count = decrypt_log(log_path, gm_home, keys_dir, output=output)
         assert count == 0
 
         lines = output.getvalue().strip().split("\n")
