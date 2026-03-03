@@ -63,10 +63,11 @@ new:
 # Run the game loop (runs inside container)
 play:
 	@test -n "$(GAME)" || { echo "Usage: make play GAME=<game-id>"; exit 1; }
-	docker run --rm -it --init \
+	docker run --rm --init \
 		-v "$$(cd perfid-games && pwd):/games" \
 		-v "perfid-sessions-$(GAME):/home/player/.claude" \
 		-e PERFID_GAMES_DIR=/games \
+		-e PYTHONUNBUFFERED=1 \
 		$(PLAYER_IMAGE) play $(GAME)
 
 # Print game status (runs inside container)

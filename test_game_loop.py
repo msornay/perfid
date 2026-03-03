@@ -93,11 +93,32 @@ def mock_subprocess_with_output(output):
     return _mock
 
 
+def mock_run_factory(stdout="", returncode=0):
+    """Create a mock subprocess.run for run_agent tests.
+
+    Writes stdout to the file handle if one is passed via the stdout
+    kwarg (matching the file-based output pattern in run_agent).
+    """
+    def _mock_run(cmd, **kwargs):
+        fh = kwargs.get("stdout")
+        if fh and hasattr(fh, "write"):
+            fh.write(stdout)
+        result = MagicMock()
+        result.returncode = returncode
+        result.stdout = stdout
+        result.stderr = ""
+        return result
+    return _mock_run
+
+
 def mock_popen_factory(stdout="", returncode=0):
-    """Create a mock Popen constructor for run_agent tests."""
+    """Create a mock Popen for run_agent tests."""
     def _mock_popen(cmd, **kwargs):
+        fh = kwargs.get("stdout")
+        if fh and hasattr(fh, "write"):
+            fh.write(stdout)
         proc = MagicMock()
-        proc.communicate.return_value = (stdout, "")
+        proc.poll.return_value = returncode  # exits immediately
         proc.returncode = returncode
         proc.pid = 99999
         return proc
@@ -205,9 +226,8 @@ class TestCleanupTurnGpg:
 class TestRunAgent:
     """Tests for run_agent.
 
-    We mock both subprocess.Popen (used by run_agent for the claude
-    call) and gpg_mod.encrypt (to prevent GPG's subprocess.run from
-    also going through the mocked Popen).
+    We mock subprocess.Popen (used by run_agent for the claude call)
+    and gpg_mod.encrypt (to avoid real GPG calls in encryption).
     """
 
     @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")

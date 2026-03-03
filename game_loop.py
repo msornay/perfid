@@ -15,6 +15,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import time
 
 import gpg as gpg_mod
 from game_state import (
@@ -337,16 +338,26 @@ def run_agent(ctx, power, prompt, env_extra=None):
 
     _log(logger, "agent_start", power=power, session=session_id)
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
-    )
+    outpath = f"/tmp/perfid-agent-{lc_power}.out"
     try:
-        output, _ = proc.communicate()
-    except KeyboardInterrupt:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
-        raise
+        with open(outpath, "w") as f:
+            proc = subprocess.Popen(
+                cmd, stdout=f, start_new_session=True,
+            )
+        try:
+            while proc.poll() is None:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise
+        with open(outpath) as f:
+            output = f.read()
+    finally:
+        try:
+            os.unlink(outpath)
+        except OSError:
+            pass
     returncode = proc.returncode
 
     if not started:
