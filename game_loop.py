@@ -49,7 +49,7 @@ from orders import (
 from prompt import system_prompt, turn_context
 
 # Minimum negotiation rounds before order submission is allowed
-MIN_NEGOTIATION_ROUNDS = int(os.environ.get("PERFID_MIN_ROUNDS", "3"))
+MIN_NEGOTIATION_ROUNDS = int(os.environ.get("PERFID_MIN_ROUNDS", "2"))
 
 # Maximum total rounds per movement phase (safety limit)
 MAX_ROUNDS = 10
