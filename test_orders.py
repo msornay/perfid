@@ -1,6 +1,5 @@
 """Tests for orders.py — Agent I/O: order submission, validation, notes."""
 
-import json
 import pytest
 
 from game_state import Phase, new_game
@@ -36,15 +35,15 @@ def state(game_dir):
 
 @pytest.fixture
 def spring_movement_state(state):
-    """State in Spring Movement phase (orders accepted)."""
-    state["phase"] = Phase.SPRING_MOVEMENT.value
+    """State in Spring phase (orders accepted)."""
+    state["phase"] = Phase.SPRING.value
     return state
 
 
 @pytest.fixture
 def fall_movement_state(state):
-    """State in Fall Movement phase."""
-    state["phase"] = Phase.FALL_MOVEMENT.value
+    """State in Fall phase."""
+    state["phase"] = Phase.FALL.value
     return state
 
 
@@ -279,13 +278,12 @@ class TestValidateOrder:
         assert not is_valid
         assert "not valid" in error
 
-    def test_diplomacy_phase_rejects_orders(self, state):
-        # state starts in Spring Diplomacy
+    def test_spring_phase_accepts_orders(self, state):
+        # state starts in Spring (movement orders accepted)
         is_valid, _, error = validate_order(
             "A Paris - Burgundy", "France", state
         )
-        assert not is_valid
-        assert "Diplomacy" in error
+        assert is_valid
 
     def test_retreat_phase_accepts_move(self, spring_retreat_state):
         is_valid, _, _ = validate_order(
@@ -433,23 +431,24 @@ class TestSubmitAndDecrypt:
         assert result["power"] == "France"
         assert result["orders"] == orders
 
-    def test_decrypt_writes_json(self, game_dir, gpg_setup):
+    def test_decrypt_no_plaintext_on_disk(self, game_dir, gpg_setup):
+        """Decrypted orders must NOT be written to disk (info leak)."""
         new_game("test-001", game_dir)
         submit_orders(
             game_dir, "France", 1901, "Spring Movement",
             ["A Paris H"], gpg_setup["agent_home"],
         )
-        decrypt_orders(
+        result = decrypt_orders(
             game_dir, "France", 1901, "Spring Movement",
             gpg_setup["gm_home"],
         )
+        assert result is not None
+        assert result["power"] == "France"
         json_path = (
             game_dir / "orders" / "1901" / "Spring_Movement"
             / "France.json"
         )
-        assert json_path.exists()
-        data = json.loads(json_path.read_text())
-        assert data["power"] == "France"
+        assert not json_path.exists()
 
     def test_decrypt_missing_returns_none(self, game_dir, gpg_setup):
         new_game("test-001", game_dir)
@@ -487,7 +486,7 @@ class TestSubmitAndDecrypt:
 class TestCollectOrders:
     def test_submitted_orders_collected(self, game_dir, gpg_setup):
         state = new_game("test-001", game_dir)
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         submit_orders(
             game_dir, "France", 1901, "Spring Movement",
             ["A Paris - Burgundy", "A Marseilles - Spain",
@@ -507,7 +506,7 @@ class TestCollectOrders:
 
     def test_missing_submission_gets_defaults(self, game_dir, gpg_setup):
         state = new_game("test-001", game_dir)
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         result = collect_orders(
             game_dir, 1901, "Spring Movement",
             gpg_setup["gm_home"], state,
@@ -521,7 +520,7 @@ class TestCollectOrders:
 
     def test_eliminated_power_gets_empty(self, game_dir, gpg_setup):
         state = new_game("test-001", game_dir)
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         state["eliminated"] = ["Turkey"]
         state["units"]["Turkey"] = []
         result = collect_orders(
@@ -532,7 +531,7 @@ class TestCollectOrders:
 
     def test_invalid_orders_produce_errors(self, game_dir, gpg_setup):
         state = new_game("test-001", game_dir)
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         # Submit partially invalid orders
         submit_orders(
             game_dir, "France", 1901, "Spring Movement",
@@ -549,7 +548,7 @@ class TestCollectOrders:
 
     def test_all_invalid_falls_to_defaults(self, game_dir, gpg_setup):
         state = new_game("test-001", game_dir)
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         submit_orders(
             game_dir, "France", 1901, "Spring Movement",
             ["gibberish", "more nonsense"],

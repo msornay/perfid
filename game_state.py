@@ -6,6 +6,7 @@ adjudication to jDip for DATC-compliant game logic.
 """
 
 import json
+import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,21 +14,17 @@ from pathlib import Path
 
 
 class Phase(Enum):
-    SPRING_DIPLOMACY = "Spring Diplomacy"
-    SPRING_MOVEMENT = "Spring Movement"
+    SPRING = "Spring"
     SPRING_RETREAT = "Spring Retreat"
-    FALL_DIPLOMACY = "Fall Diplomacy"
-    FALL_MOVEMENT = "Fall Movement"
+    FALL = "Fall"
     FALL_RETREAT = "Fall Retreat"
     WINTER_ADJUSTMENT = "Winter Adjustment"
 
 
 PHASE_ORDER = [
-    Phase.SPRING_DIPLOMACY,
-    Phase.SPRING_MOVEMENT,
+    Phase.SPRING,
     Phase.SPRING_RETREAT,
-    Phase.FALL_DIPLOMACY,
-    Phase.FALL_MOVEMENT,
+    Phase.FALL,
     Phase.FALL_RETREAT,
     Phase.WINTER_ADJUSTMENT,
 ]
@@ -167,7 +164,7 @@ def new_game(game_id, game_dir, use_jdip=True):
     state = {
         "game_id": game_id,
         "year": 1901,
-        "phase": Phase.SPRING_DIPLOMACY.value,
+        "phase": Phase.SPRING.value,
         "units": units,
         "sc_ownership": sc_ownership,
         "eliminated": [],
@@ -383,6 +380,10 @@ def adjudicate(state, all_orders, game_dir=None):
 
     state = apply_orders(state, result, game_dir)
 
+    # Preserve order_results for transcript logging
+    if "order_results" in result:
+        state["order_results"] = result["order_results"]
+
     # Check win using SC counts from jDip's updated ownership
     if result.get("game_over"):
         winner = check_win(state)
@@ -527,3 +528,45 @@ def format_status(state):
 
     lines.append(f"\nTotal SCs owned: {sum(counts.values())}/34")
     return "\n".join(lines)
+
+
+def load_sessions(game_dir):
+    """Load sessions.json from game directory.
+
+    Returns a dict mapping power name to session info:
+    {power: {"id": uuid_str, "started": bool}}
+    """
+    game_dir = Path(game_dir)
+    path = game_dir / "sessions.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {}
+
+
+def save_sessions(sessions, game_dir):
+    """Save sessions dict to sessions.json."""
+    game_dir = Path(game_dir)
+    path = game_dir / "sessions.json"
+    path.write_text(
+        json.dumps(sessions, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def get_session_id(game_dir, power):
+    """Return existing or generate new session UUID for a power."""
+    sessions = load_sessions(game_dir)
+    if power not in sessions:
+        sessions[power] = {
+            "id": str(uuid.uuid4()),
+            "started": False,
+        }
+        save_sessions(sessions, game_dir)
+    return sessions[power]["id"]
+
+
+def mark_session_started(game_dir, power):
+    """Record that a session has been started (first prompt sent)."""
+    sessions = load_sessions(game_dir)
+    if power in sessions:
+        sessions[power]["started"] = True
+        save_sessions(sessions, game_dir)

@@ -164,3 +164,71 @@ class GameLogger:
                 if event_type is None or event.get("event") == event_type:
                     events.append(event)
         return events
+
+
+class TranscriptLogger:
+    """Full game transcript logger.
+
+    Writes to $GAMES_DIR/transcripts/<game-id>.jsonl, outside the
+    container bind-mount so agents cannot read each other's reasoning.
+    """
+
+    def __init__(self, games_dir, game_id):
+        self.transcript_dir = os.path.join(games_dir, "transcripts")
+        self.log_path = os.path.join(
+            self.transcript_dir, f"{game_id}.jsonl"
+        )
+
+    def _write(self, event):
+        os.makedirs(self.transcript_dir, exist_ok=True)
+        with open(self.log_path, "a") as f:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+    def _event(self, event_type, **kwargs):
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event_type,
+        }
+        event.update(kwargs)
+        self._write(event)
+
+    def agent_turn(self, power, year, phase, output):
+        """Log full agent output from a turn."""
+        self._event(
+            "agent_turn",
+            power=power,
+            year=year,
+            phase=phase,
+            output=output,
+        )
+
+    def message(self, sender, recipient, year, phase, text):
+        """Log a decrypted message between powers."""
+        self._event(
+            "message",
+            sender=sender,
+            recipient=recipient,
+            year=year,
+            phase=phase,
+            text=text,
+        )
+
+    def adjudication(self, year, phase, order_results, dislodged):
+        """Log full adjudication results to transcript."""
+        self._event(
+            "adjudication",
+            year=year,
+            phase=phase,
+            order_results=order_results,
+            dislodged=dislodged,
+        )
+
+    def orders(self, power, year, phase, orders):
+        """Log decrypted orders for a power."""
+        self._event(
+            "orders",
+            power=power,
+            year=year,
+            phase=phase,
+            orders=orders,
+        )

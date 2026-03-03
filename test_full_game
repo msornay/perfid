@@ -1,0 +1,464 @@
+#!/usr/bin/env bash
+# Full-game integration test: runs perfid play end-to-end with a mock claude.
+#
+# Uses production code paths for everything — GPG encryption, jDip
+# adjudication, order submission, message routing. Only the AI
+# decision-making (claude) is replaced with prerecorded scenario data.
+#
+# Scenario: complete 1901 year with a dislodgement (Russia dislodges
+# Austria from Galicia via supported attack), retreat, and winter builds.
+#
+# Requires Docker — creates a real game container.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PERFID="$SCRIPT_DIR/perfid"
+# Short path to avoid GPG agent socket length limit (108 chars)
+TEST_WS="/tmp/perfid-t$$"
+mkdir -p "$TEST_WS"
+export PERFID_GAMES_DIR="$TEST_WS/g"
+
+pass=0
+fail=0
+game_id="full-$$"
+ctr_name="perfid-${game_id}"
+
+cleanup() {
+    docker rm -f "$ctr_name" 2>/dev/null || true
+    docker volume rm "perfid-sessions-${game_id}" 2>/dev/null || true
+    rm -rf "$TEST_WS"
+}
+trap cleanup EXIT
+
+ok() { pass=$((pass + 1)); echo "ok   - $1"; }
+ko() { fail=$((fail + 1)); echo "FAIL - $1"; }
+
+# Run a command with a timeout (portable: timeout, gtimeout, or perl)
+run_with_timeout() {
+    local secs=$1; shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$secs" "$@"
+    else
+        perl -e 'alarm shift @ARGV; exec @ARGV' "$secs" "$@"
+    fi
+}
+
+echo "=== Full-game integration test (requires Docker) ==="
+
+# -- Ensure clean slate (previous failed run) --
+docker rm -f "$ctr_name" 2>/dev/null || true
+docker volume rm "perfid-sessions-${game_id}" 2>/dev/null || true
+
+# ===== Setup =====
+
+if "$PERFID" new "$game_id" >/dev/null 2>&1; then
+    ok "perfid new creates game"
+else
+    ko "perfid new creates game"
+    echo "FATAL: cannot continue without game" >&2
+    exit 1
+fi
+
+if "$PERFID" bootstrap "$game_id" >/dev/null 2>&1; then
+    ok "perfid bootstrap generates keys"
+else
+    ko "perfid bootstrap generates keys"
+    echo "FATAL: cannot continue without keys" >&2
+    exit 1
+fi
+
+gd="$PERFID_GAMES_DIR/$game_id"
+
+# -- Install mock claude in the container --
+docker cp "$SCRIPT_DIR/test_mock_claude" "$ctr_name:/usr/local/bin/claude"
+docker exec "$ctr_name" chmod +x /usr/local/bin/claude
+
+# ===== Run the full game =====
+
+echo "  Running perfid play (timeout 300s)..."
+run_with_timeout 300 "$PERFID" play "$game_id" >"$TEST_WS/play.log" 2>&1
+play_rc=$?
+
+# timeout returns 124 on SIGTERM — expected when mock sleeps at 1902
+if [[ $play_rc -eq 124 ]] || [[ $play_rc -eq 137 ]]; then
+    ok "play loop terminated by timeout (expected at 1902)"
+elif [[ $play_rc -eq 0 ]]; then
+    ok "play loop exited cleanly"
+else
+    ko "play exited with unexpected code $play_rc"
+    echo "  Play log tail:" >&2
+    tail -30 "$TEST_WS/play.log" >&2
+fi
+
+# ===== Assertions =====
+
+# Helper: read a value from state.json via Python
+py_state() {
+    python3 -c "
+import json
+with open('$gd/state.json') as f:
+    d = json.load(f)
+$1
+"
+}
+
+echo ""
+echo "--- State assertions ---"
+
+state_year=$(py_state "print(d['year'])")
+state_phase=$(py_state "print(d['phase'])")
+state_winner=$(py_state "print(d['winner'])")
+
+if [[ "$state_year" == "1902" ]]; then ok "year is 1902"
+else ko "year: expected 1902, got $state_year"; fi
+
+if [[ "$state_phase" == "Spring" ]]; then ok "phase is Spring"
+else ko "phase: expected Spring, got $state_phase"; fi
+
+if [[ "$state_winner" == "None" ]]; then ok "no winner yet"
+else ko "winner: expected None, got $state_winner"; fi
+
+echo ""
+echo "--- GPG key assertions ---"
+
+for power in Austria England France Germany Italy Russia Turkey; do
+    key_file="$gd/keys/${power}.key.gpg"
+    if [[ -f "$key_file" ]]; then
+        # gpg --list-packets exits non-zero when it can't decrypt, so
+        # capture output first to avoid pipefail false-negatives
+        packets=$(gpg --list-packets "$key_file" 2>/dev/null || true)
+        if echo "$packets" | grep -q "pubkey enc packet"; then
+            ok "$power key is GPG-encrypted (asymmetric)"
+        else
+            ko "$power key is not GPG-encrypted"
+        fi
+    else
+        ko "$power key file missing"
+    fi
+done
+
+echo ""
+echo "--- Order file assertions ---"
+
+count_orders() {
+    local dir="$gd/orders/1901/$1"
+    if [[ -d "$dir" ]]; then
+        find "$dir" -name "*.gpg" | wc -l | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+spring_n=$(count_orders "Spring")
+fall_n=$(count_orders "Fall")
+retreat_n=$(count_orders "Fall_Retreat")
+winter_n=$(count_orders "Winter_Adjustment")
+
+if [[ "$spring_n" -eq 7 ]]; then ok "Spring 1901: $spring_n/7 order files"
+else ko "Spring 1901: $spring_n/7 order files"; fi
+
+if [[ "$fall_n" -eq 7 ]]; then ok "Fall 1901: $fall_n/7 order files"
+else ko "Fall 1901: $fall_n/7 order files"; fi
+
+if [[ "$retreat_n" -eq 1 ]]; then ok "Fall Retreat 1901: $retreat_n/1 order files"
+else ko "Fall Retreat 1901: $retreat_n/1 order files"; fi
+
+if [[ "$winter_n" -eq 7 ]]; then ok "Winter 1901: $winter_n/7 order files"
+else ko "Winter 1901: $winter_n/7 order files"; fi
+
+echo ""
+echo "--- Message assertions ---"
+
+# Messages are archived after the phase; search the whole tree
+check_msg() {
+    local sender=$1 recipient=$2
+    if find "$gd/messages" -name "${sender}-to-${recipient}-*" 2>/dev/null | grep -q .; then
+        ok "message from $sender to $recipient exists"
+    else
+        ko "message from $sender to $recipient missing"
+    fi
+}
+
+check_msg France England
+check_msg England France
+check_msg Germany Russia
+check_msg Russia Turkey
+
+echo ""
+echo "--- SC ownership assertions ---"
+
+sc_owner() {
+    py_state "print(d['sc_ownership'].get('$1', 'NONE'))"
+}
+
+check_sc() {
+    local sc=$1 expected=$2
+    actual=$(sc_owner "$sc")
+    if [[ "$actual" == "$expected" ]]; then ok "SC $sc owned by $expected"
+    else ko "SC $sc: expected $expected, got $actual"; fi
+}
+
+# New captures after Fall 1901
+check_sc Serbia Austria
+check_sc Greece Austria
+check_sc Norway England
+check_sc Belgium France
+check_sc Spain France
+check_sc Portugal France
+check_sc Denmark Germany
+check_sc Holland Germany
+check_sc Trieste Italy
+check_sc Tunis Italy
+check_sc Rumania Russia
+check_sc Bulgaria Turkey
+
+echo ""
+echo "--- Unit count assertions ---"
+
+unit_count() {
+    py_state "print(len(d['units'].get('$1', [])))"
+}
+
+# After Winter builds, unit count must equal SC count for each power
+mismatch=false
+for power in Austria England France Germany Italy Russia Turkey; do
+    n_units=$(unit_count "$power")
+    n_sc=$(py_state "print(sum(1 for v in d['sc_ownership'].values() if v == '$power'))")
+    if [[ "$n_units" != "$n_sc" ]]; then
+        ko "$power: $n_units units but $n_sc SCs"
+        mismatch=true
+    fi
+done
+if [[ "$mismatch" == "false" ]]; then
+    ok "all powers: unit count matches SC count"
+fi
+
+# Specific unit counts (after builds)
+for pair in "Austria:4" "England:4" "France:6" "Germany:5" "Italy:5" "Russia:5" "Turkey:4"; do
+    power="${pair%%:*}"
+    expected="${pair##*:}"
+    actual=$(unit_count "$power")
+    if [[ "$actual" == "$expected" ]]; then ok "$power has $expected units"
+    else ko "$power: expected $expected units, got $actual"; fi
+done
+
+echo ""
+echo "--- Phase progression assertions ---"
+
+# Fall Retreat was processed (not skipped)
+if [[ -d "$gd/orders/1901/Fall_Retreat" ]]; then
+    ok "Fall Retreat directory exists (phase was not skipped)"
+else
+    ko "Fall Retreat directory missing (phase may have been skipped)"
+fi
+
+# Austria retreated to Vienna (verify unit present after builds)
+has_vienna=$(py_state "
+units = d['units'].get('Austria', [])
+print(any(u['location'] == 'Vienna' for u in units))
+")
+# Austria retreated A Galicia - Vienna, then built A Budapest.
+# Vienna should have the retreated unit.
+if [[ "$has_vienna" == "True" ]]; then
+    ok "Austria has unit in Vienna (retreat destination)"
+else
+    ko "Austria missing unit in Vienna"
+fi
+
+echo ""
+echo "--- Log and transcript assertions ---"
+
+if [[ -f "$gd/log.jsonl" ]]; then ok "game log exists"
+else ko "game log not found"; fi
+
+transcript="$PERFID_GAMES_DIR/transcripts/${game_id}.jsonl"
+if [[ -f "$transcript" ]]; then ok "transcript file exists"
+else ko "transcript file not found"; fi
+
+# Transcript should have orders events: Spring(7) + Fall(7) +
+# Fall Retreat(1) + Winter(7) = 22
+if [[ -f "$transcript" ]]; then
+    orders_count=$(python3 -c "
+import json
+count = 0
+with open('$transcript') as f:
+    for line in f:
+        try:
+            if json.loads(line)['event'] == 'orders':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$orders_count" -ge 22 ]]; then
+        ok "transcript has $orders_count orders events (>=22)"
+    else
+        ko "transcript has $orders_count orders events (expected >=22)"
+    fi
+
+    # agent_turn events >= 22 (Spring 7 + Fall 7 + Retreat 1 + Winter 7)
+    agent_turn_count=$(python3 -c "
+import json
+count = 0
+with open('$transcript') as f:
+    for line in f:
+        try:
+            if json.loads(line)['event'] == 'agent_turn':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$agent_turn_count" -ge 22 ]]; then
+        ok "transcript has $agent_turn_count agent_turn events (>=22)"
+    else
+        ko "transcript has $agent_turn_count agent_turn events (expected >=22)"
+    fi
+
+    # agent_turn output contains "Strategy:" (rich, not one-liners)
+    has_strategy=$(python3 -c "
+import json
+found = False
+with open('$transcript') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e['event'] == 'agent_turn' and 'Strategy:' in e.get('output', ''):
+                found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$has_strategy" == "True" ]]; then
+        ok "agent_turn output contains Strategy: reasoning"
+    else
+        ko "agent_turn output missing Strategy: reasoning"
+    fi
+
+    # agent_turn output contains "Simulating" (jDip simulation printed)
+    has_simulating=$(python3 -c "
+import json
+found = False
+with open('$transcript') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e['event'] == 'agent_turn' and 'Simulating with jDip' in e.get('output', ''):
+                found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$has_simulating" == "True" ]]; then
+        ok "agent_turn output contains Simulating with jDip"
+    else
+        ko "agent_turn output missing Simulating with jDip"
+    fi
+
+    # At least one agent_turn contains "Inbox:" with decrypted message text
+    has_inbox_msg=$(python3 -c "
+import json
+found = False
+with open('$transcript') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e['event'] == 'agent_turn':
+                output = e.get('output', '')
+                if 'Inbox:' in output and 'From ' in output:
+                    found = True
+                    break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$has_inbox_msg" == "True" ]]; then
+        ok "agent_turn contains Inbox: with decrypted message"
+    else
+        ko "agent_turn missing Inbox: with decrypted message"
+    fi
+
+    # message events >= 4 (the 4 Spring diplomatic messages)
+    msg_count=$(python3 -c "
+import json
+count = 0
+with open('$transcript') as f:
+    for line in f:
+        try:
+            if json.loads(line)['event'] == 'message':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$msg_count" -ge 4 ]]; then
+        ok "transcript has $msg_count message events (>=4)"
+    else
+        ko "transcript has $msg_count message events (expected >=4)"
+    fi
+
+    # adjudication events >= 2 (Spring + Fall movement phases)
+    adj_count=$(python3 -c "
+import json
+count = 0
+with open('$transcript') as f:
+    for line in f:
+        try:
+            if json.loads(line)['event'] == 'adjudication':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$adj_count" -ge 2 ]]; then
+        ok "transcript has $adj_count adjudication events (>=2)"
+    else
+        ko "transcript has $adj_count adjudication events (expected >=2)"
+    fi
+
+    # adjudication events contain order_results with per-order data
+    adj_has_results=$(python3 -c "
+import json
+found = False
+with open('$transcript') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e['event'] == 'adjudication':
+                results = e.get('order_results', [])
+                if isinstance(results, list) and len(results) > 0:
+                    found = True
+                    break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$adj_has_results" == "True" ]]; then
+        ok "adjudication events contain order_results"
+    else
+        ko "adjudication events missing order_results"
+    fi
+fi
+
+echo ""
+echo "--- Security assertions ---"
+
+if [[ ! -f "$gd/master.passphrase" ]]; then ok "master.passphrase never created"
+else ko "master.passphrase exists!"; fi
+
+if docker exec "$ctr_name" test -e /game/transcripts 2>/dev/null; then
+    ko "transcript visible inside container!"
+else
+    ok "transcript not visible inside container"
+fi
+
+# ===== Results =====
+
+echo ""
+echo "=== Results ==="
+echo "$((pass + fail)) tests, $pass passed, $fail failed"
+[[ $fail -eq 0 ]]

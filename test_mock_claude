@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""Mock claude for integration testing.
+
+Replaces the real claude binary in the container. Uses production Python
+modules for all game operations — GPG encryption, order submission,
+message routing, and jDip simulation. Only the AI decision-making is
+replaced with prerecorded scenario data.
+
+Prints rich, detailed output to stdout — strategy reasoning, simulation
+results, order rationale, inbox messages (decrypted via GPG), and
+diplomatic message content. This output is captured by run_agent's tee
+and logged to the TranscriptLogger automatically.
+
+Installed via: docker cp test_mock_claude <ctr>:/usr/local/bin/claude
+"""
+import os
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, '/perfid')
+
+from game_state import load_state  # noqa: E402
+from jdip_adapter import simulate  # noqa: E402
+from message_router import list_inbox, send_message  # noqa: E402
+from orders import submit_orders  # noqa: E402
+import gpg as gpg_mod  # noqa: E402
+
+# ── Scenario: full 1901 year with dislodgement ──────────────────────
+
+SPRING_1901 = {
+    "Austria": [
+        "A Vienna - Galicia",
+        "A Budapest - Serbia",
+        "F Trieste - Albania",
+    ],
+    "England": [
+        "F London - North Sea",
+        "F Edinburgh - Norwegian Sea",
+        "A Liverpool - Yorkshire",
+    ],
+    "France": [
+        "A Paris - Burgundy",
+        "A Marseilles - Spain",
+        "F Brest - Mid-Atlantic Ocean",
+    ],
+    "Germany": [
+        "F Kiel - Denmark",
+        "A Berlin - Kiel",
+        "A Munich - Ruhr",
+    ],
+    "Italy": [
+        "A Venice - Piedmont",
+        "A Rome - Venice",
+        "F Naples - Ionian Sea",
+    ],
+    "Russia": [
+        "F St Petersburg (South Coast) - Gulf of Bothnia",
+        "A Moscow - Ukraine",
+        "A Warsaw - Silesia",
+        "F Sevastopol - Black Sea",
+    ],
+    "Turkey": [
+        "A Constantinople - Bulgaria",
+        "A Smyrna - Constantinople",
+        "F Ankara H",
+    ],
+}
+
+FALL_1901 = {
+    "Austria": [
+        "A Galicia H",
+        "A Serbia H",
+        "F Albania - Greece",
+    ],
+    "England": [
+        "A Yorkshire - Norway",
+        "F North Sea C A Yorkshire - Norway",
+        "F Norwegian Sea S A Yorkshire - Norway",
+    ],
+    "France": [
+        "A Burgundy - Belgium",
+        "A Spain H",
+        "F Mid-Atlantic Ocean - Portugal",
+    ],
+    "Germany": [
+        "F Denmark - Sweden",
+        "A Kiel - Holland",
+        "A Ruhr - Munich",
+    ],
+    "Italy": [
+        "A Piedmont H",
+        "A Venice - Trieste",
+        "F Ionian Sea - Tunis",
+    ],
+    "Russia": [
+        "A Silesia - Galicia",
+        "A Ukraine S A Silesia - Galicia",
+        "F Gulf of Bothnia - Sweden",
+        "F Black Sea - Rumania",
+    ],
+    "Turkey": [
+        "A Bulgaria H",
+        "A Constantinople - Smyrna",
+        "F Ankara - Constantinople",
+    ],
+}
+
+FALL_RETREAT_1901 = {
+    "Austria": ["A Galicia - Vienna"],
+}
+
+WINTER_1901 = {
+    "Austria": ["Build A Budapest"],
+    "England": ["Build F London"],
+    "France": [
+        "Build A Paris",
+        "Build A Marseilles",
+        "Build F Brest",
+    ],
+    "Germany": [
+        "Build A Berlin",
+        "Build A Kiel",
+    ],
+    "Italy": [
+        "Build A Rome",
+        "Build F Naples",
+    ],
+    "Russia": ["Build A Moscow"],
+    "Turkey": ["Build F Ankara"],
+}
+
+SCENARIO = {
+    "Spring": SPRING_1901,
+    "Fall": FALL_1901,
+    "Fall Retreat": FALL_RETREAT_1901,
+    "Winter Adjustment": WINTER_1901,
+}
+
+SPRING_MESSAGES = [
+    ("France", "England",
+     "Propose alliance against Germany. "
+     "I take Belgium, you take Norway."),
+    ("England", "France",
+     "Agreed. Will convoy to Norway. DMZ in English Channel."),
+    ("Germany", "Russia",
+     "Non-aggression in the east. I go west, you go south."),
+    ("Russia", "Turkey",
+     "Let's coordinate. "
+     "I'll take Rumania, support me from Bulgaria."),
+]
+
+# ── Strategy reasoning per power/phase ──────────────────────────────
+
+STRATEGY = {
+    "Spring": {
+        "Austria": (
+            "Open with the Balkan gambit. Galicia pressures Russia "
+            "and secures a northern buffer. Serbia is the easy "
+            "neutral. Fleet to Albania positions for Greece in Fall."
+        ),
+        "England": (
+            "Standard North Sea opening. Position fleet in "
+            "Norwegian Sea and army in Yorkshire for a Fall convoy "
+            "to Norway. North Sea controls the critical sea lane."
+        ),
+        "France": (
+            "Burgundy threatens both Belgium and Munich — keep "
+            "Germany guessing. Marseilles to Spain is a safe grab. "
+            "Fleet to Mid-Atlantic opens Portugal and supports "
+            "Iberian defense."
+        ),
+        "Germany": (
+            "Denmark secures Scandinavian access. Army to Kiel "
+            "backfills the fleet's departure. Ruhr positions toward "
+            "the western front — Belgium or Holland in Fall."
+        ),
+        "Italy": (
+            "Lepanto variant. Piedmont threatens Marseilles and "
+            "keeps France honest. Venice fills the gap. Fleet to "
+            "Ionian sets up Tunis or eastern Mediterranean plays."
+        ),
+        "Russia": (
+            "Southern expansion. Ukraine supports Silesia into "
+            "Galicia for Fall. Fleet to Black Sea targets Rumania. "
+            "Gulf of Bothnia positions for a Swedish play."
+        ),
+        "Turkey": (
+            "Balkan opening. Bulgaria is the target neutral. "
+            "Constantinople shuffle frees Smyrna for a build. "
+            "Fleet holds in Ankara — no need to rush."
+        ),
+    },
+    "Fall": {
+        "Austria": (
+            "Hold Galicia and Serbia. Greece capture from Albania "
+            "is straightforward. Risk: Russia may push into Galicia "
+            "with support — but holding is the only option."
+        ),
+        "England": (
+            "Execute the Norway convoy. North Sea convoys Yorkshire "
+            "to Norway, Norwegian Sea supports. This is the bread "
+            "and butter of the English opening."
+        ),
+        "France": (
+            "Belgium from Burgundy — easy capture. Spain holds. "
+            "Mid-Atlantic to Portugal rounds out the Iberian "
+            "conquest. Three new SCs this year."
+        ),
+        "Germany": (
+            "Sweden from Denmark, Holland from Kiel, Munich from "
+            "Ruhr. Three-way expansion. Sweden may bounce with "
+            "Russia if they go for it from Gulf of Bothnia."
+        ),
+        "Italy": (
+            "Piedmont holds to maintain French pressure. Venice "
+            "into Trieste is opportunistic — Austria is distracted "
+            "in the Balkans. Tunis from Ionian is the safe grab."
+        ),
+        "Russia": (
+            "Galicia attack: Silesia moves in with Ukraine support. "
+            "This dislodges Austria. Gulf of Bothnia to Sweden and "
+            "Black Sea to Rumania complete the expansion."
+        ),
+        "Turkey": (
+            "Bulgaria holds — already captured. Constantinople to "
+            "Smyrna shuffles south. Ankara fleet moves to "
+            "Constantinople for a build slot."
+        ),
+    },
+    "Fall Retreat": {
+        "Austria": (
+            "Dislodged from Galicia by Russia's supported attack. "
+            "Must retreat. Vienna is the only safe home center — "
+            "Budapest could block a winter build."
+        ),
+    },
+    "Winter Adjustment": {
+        "Austria": (
+            "Gained Greece (+1) but lost nothing net. Build army "
+            "in Budapest to reinforce the eastern front."
+        ),
+        "England": (
+            "Gained Norway (+1). Build fleet in London for "
+            "North Sea control and potential Belgium pressure."
+        ),
+        "France": (
+            "Gained Belgium, Spain, Portugal (+3). Build three: "
+            "army Paris, army Marseilles, fleet Brest. Maximum "
+            "expansion capacity."
+        ),
+        "Germany": (
+            "Gained Denmark, Holland (+2). Sweden bounced with "
+            "Russia. Build army Berlin and army Kiel for land "
+            "forces to push east or west."
+        ),
+        "Italy": (
+            "Gained Trieste, Tunis (+2). Build army Rome and "
+            "fleet Naples to maintain dual-front pressure."
+        ),
+        "Russia": (
+            "Gained Rumania (+1). Sweden bounced with Germany. "
+            "Build army Moscow — need land units for the push "
+            "into Austria and Turkey."
+        ),
+        "Turkey": (
+            "Gained Bulgaria (+1). Build fleet Ankara for Black "
+            "Sea operations and potential Russian confrontation."
+        ),
+    },
+}
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+
+def get_power():
+    """Determine power from GNUPGHOME path.
+
+    setup_turn_gpg sets GNUPGHOME=/tmp/gpg-<lowercase power>.
+    """
+    gnupghome = os.environ.get('GNUPGHOME', '')
+    name = os.path.basename(gnupghome).replace('gpg-', '')
+    return name[0].upper() + name[1:] if name else ''
+
+
+def print_position(state, power):
+    """Print unit and SC summary for a power."""
+    units = state.get('units', {}).get(power, [])
+    sc_count = sum(
+        1 for v in state.get('sc_ownership', {}).values()
+        if v == power
+    )
+    sc_names = sorted(
+        k for k, v in state.get('sc_ownership', {}).items()
+        if v == power
+    )
+    print(f"Position: {len(units)} units, {sc_count} SCs "
+          f"({', '.join(sc_names)})")
+
+
+def print_inbox(power, gnupghome):
+    """Read and decrypt inbox messages. Returns list of messages."""
+    messages = list_inbox('/game', power)
+    if not messages:
+        print("Inbox: (empty)")
+        return []
+
+    print("Inbox:")
+    decrypted = []
+    for msg in messages:
+        sender = msg['sender']
+        path = msg['path']
+        try:
+            text = gpg_mod.decrypt_file(gnupghome, path)
+            print(f'  From {sender}: "{text}"')
+            decrypted.append((sender, text))
+        except Exception:
+            # Fall back to gpg subprocess if module fails
+            try:
+                result = subprocess.run(
+                    ['gpg', '--batch', '--yes', '--homedir',
+                     gnupghome, '--decrypt', path],
+                    capture_output=True,
+                )
+                if result.returncode == 0:
+                    text = result.stdout.decode()
+                    print(f'  From {sender}: "{text}"')
+                    decrypted.append((sender, text))
+                else:
+                    print(f'  From {sender}: (decrypt failed)')
+            except Exception:
+                print(f'  From {sender}: (decrypt failed)')
+    return decrypted
+
+
+def print_simulation(result, power, orders):
+    """Print per-order simulation results."""
+    print("Simulating with jDip:")
+    order_results = result.get('order_results', [])
+
+    # Build a map from order text to result
+    result_map = {}
+    for entry in order_results:
+        # order format: "Power: A Location - Destination"
+        order_text = entry.get('order', '')
+        if ':' in order_text:
+            order_text = order_text.split(':', 1)[1].strip()
+        status = entry.get('result', 'unknown')
+        result_map[order_text] = status
+
+    for order in orders:
+        status = result_map.get(order, 'unknown')
+        # Normalize status display
+        if 'success' in status.lower() or status.lower() == 'success':
+            display = 'SUCCESS'
+        elif 'bounce' in status.lower():
+            display = 'BOUNCE'
+        elif 'fail' in status.lower() or 'dislodge' in status.lower():
+            display = 'FAIL'
+        else:
+            display = status.upper()
+        print(f"  {order:<45s} -> {display}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+
+def main():
+    state = load_state('/game')
+    power = get_power()
+    gnupghome = os.environ['GNUPGHOME']
+    year = state['year']
+    phase = state['phase']
+
+    print(f"\n=== {power} — {phase} {year} ===\n")
+
+    # At year 1902+, sleep so the test's timeout kills the play loop
+    if year >= 1902:
+        print(f"Year {year} reached. Waiting for game master "
+              f"instructions.\n")
+        time.sleep(86400)
+        return
+
+    orders = SCENARIO.get(phase, {}).get(power, [])
+    strategy = STRATEGY.get(phase, {}).get(power, '')
+
+    # Position summary
+    print_position(state, power)
+    print()
+
+    # Read inbox (exercises real GPG decrypt path)
+    print_inbox(power, gnupghome)
+    print()
+
+    # Strategy reasoning
+    if strategy:
+        print(f"Strategy: {strategy}")
+        print()
+
+    # Movement phases: simulate with jDip, then submit
+    if phase in ('Spring', 'Fall') and orders:
+        result = simulate(state, {power: orders})
+        print_simulation(result, power, orders)
+        print()
+        print("Submitting orders:")
+        for order in orders:
+            print(f"  {order}")
+        submit_orders(
+            '/game', power, year, phase, orders, gnupghome,
+        )
+        print()
+
+    # Retreat: submit directly with reasoning
+    if phase == 'Fall Retreat' and orders:
+        # Show dislodgement info
+        dislodged = state.get('dislodged', [])
+        for d in dislodged:
+            if d['power'] == power:
+                unit = d['unit']
+                retreats = d.get('retreats', [])
+                print(f"Dislodged: {unit['type']} {unit['location']}")
+                print(f"Retreat options: {', '.join(retreats)}")
+                print()
+        print("Submitting retreat orders:")
+        for order in orders:
+            print(f"  {order}")
+        submit_orders(
+            '/game', power, year, phase, orders, gnupghome,
+        )
+        print()
+
+    # Winter Adjustment: submit directly with reasoning
+    if phase == 'Winter Adjustment' and orders:
+        # Show SC vs unit delta
+        n_units = len(state.get('units', {}).get(power, []))
+        n_sc = sum(
+            1 for v in state.get('sc_ownership', {}).values()
+            if v == power
+        )
+        delta = n_sc - n_units
+        if delta > 0:
+            print(f"Adjustment: {n_sc} SCs, {n_units} units "
+                  f"(+{delta} builds)")
+        elif delta < 0:
+            print(f"Adjustment: {n_sc} SCs, {n_units} units "
+                  f"({delta} disbands)")
+        else:
+            print(f"Adjustment: {n_sc} SCs, {n_units} units "
+                  f"(no change)")
+        print()
+        print("Submitting adjustment orders:")
+        for order in orders:
+            print(f"  {order}")
+        submit_orders(
+            '/game', power, year, phase, orders, gnupghome,
+        )
+        print()
+
+    # Send diplomatic messages (Spring only)
+    if phase == 'Spring':
+        sent_any = False
+        for sender, recipient, text in SPRING_MESSAGES:
+            if sender == power:
+                ct = gpg_mod.encrypt(
+                    gnupghome, text,
+                    f'{recipient.lower()}@perfid.local',
+                )
+                send_message(
+                    '/game', power, recipient, phase, 1, ct,
+                )
+                print(f'Sending message to {recipient}: "{text}"')
+                sent_any = True
+        if not sent_any:
+            print("No messages to send this turn.")
+    print()
+
+    print(f"=== {power} done ===")
+
+
+if __name__ == '__main__':
+    main()

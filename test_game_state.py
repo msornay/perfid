@@ -19,9 +19,13 @@ from game_state import (
     check_win,
     format_status,
     get_phase,
+    get_session_id,
+    load_sessions,
     load_state,
+    mark_session_started,
     new_game,
     next_phase,
+    save_sessions,
     save_state,
     sc_counts,
     skip_retreat_if_empty,
@@ -53,7 +57,7 @@ class TestNewGame:
         assert state["year"] == 1901
 
     def test_initial_phase(self, state):
-        assert state["phase"] == "Spring Diplomacy"
+        assert state["phase"] == "Spring"
 
     def test_all_powers_have_units(self, state):
         for power in POWERS:
@@ -169,39 +173,39 @@ class TestSaveLoad:
 
 class TestPhaseProgression:
     def test_all_phases_in_order(self):
-        assert len(PHASE_ORDER) == 7
-        assert PHASE_ORDER[0] == Phase.SPRING_DIPLOMACY
+        assert len(PHASE_ORDER) == 5
+        assert PHASE_ORDER[0] == Phase.SPRING
         assert PHASE_ORDER[-1] == Phase.WINTER_ADJUSTMENT
 
     def test_next_phase_advances(self, state):
-        assert state["phase"] == "Spring Diplomacy"
+        assert state["phase"] == "Spring"
         next_phase(state)
-        assert state["phase"] == "Spring Movement"
+        assert state["phase"] == "Spring Retreat"
 
     def test_full_year_cycle(self, state):
         phases_seen = [state["phase"]]
-        for _ in range(7):
+        for _ in range(5):
             next_phase(state)
             phases_seen.append(state["phase"])
 
-        # Should have cycled back to Spring Diplomacy
-        assert phases_seen[-1] == "Spring Diplomacy"
+        # Should have cycled back to Spring
+        assert phases_seen[-1] == "Spring"
         assert state["year"] == 1902
 
     def test_year_increments_after_winter(self, state):
         # Advance to Winter Adjustment
-        for _ in range(6):
+        for _ in range(4):
             next_phase(state)
         assert state["phase"] == "Winter Adjustment"
         assert state["year"] == 1901
 
         next_phase(state)
-        assert state["phase"] == "Spring Diplomacy"
+        assert state["phase"] == "Spring"
         assert state["year"] == 1902
 
     def test_get_phase_returns_enum(self, state):
         p = get_phase(state)
-        assert p == Phase.SPRING_DIPLOMACY
+        assert p == Phase.SPRING
         assert isinstance(p, Phase)
 
 
@@ -210,7 +214,7 @@ class TestSkipRetreat:
         state["phase"] = Phase.SPRING_RETREAT.value
         state["dislodged"] = []
         skip_retreat_if_empty(state)
-        assert state["phase"] == "Fall Diplomacy"
+        assert state["phase"] == "Fall"
 
     def test_does_not_skip_when_dislodged(self, state):
         state["phase"] = Phase.SPRING_RETREAT.value
@@ -225,9 +229,9 @@ class TestSkipRetreat:
         assert state["phase"] == "Winter Adjustment"
 
     def test_no_op_on_non_retreat_phase(self, state):
-        state["phase"] = Phase.SPRING_MOVEMENT.value
+        state["phase"] = Phase.SPRING.value
         skip_retreat_if_empty(state)
-        assert state["phase"] == "Spring Movement"
+        assert state["phase"] == "Spring"
 
 
 class TestSupplyCenters:
@@ -395,7 +399,9 @@ class TestApplyRetreats:
             "destination": "Tyrolia",
         }])
 
-        locations = [u["location"] for u in state["units"]["Austria"]]
+        locations = [
+            u["location"] for u in state["units"]["Austria"]
+        ]
         assert "Tyrolia" in locations
         assert state["dislodged"] == []
 
@@ -417,7 +423,9 @@ class TestApplyRetreats:
 
         # Unit was dislodged (not in units list), disband means
         # it stays removed
-        locations = [u["location"] for u in state["units"]["Austria"]]
+        locations = [
+            u["location"] for u in state["units"]["Austria"]
+        ]
         assert "Vienna" not in locations
 
 
@@ -442,7 +450,9 @@ class TestApplyAdjustments:
         })
 
         assert len(state["units"]["France"]) == 2
-        locations = [u["location"] for u in state["units"]["France"]]
+        locations = [
+            u["location"] for u in state["units"]["France"]
+        ]
         assert "Brest" not in locations
 
 
@@ -470,7 +480,7 @@ class TestFormatStatus:
     def test_contains_year_and_phase(self, state):
         status = format_status(state)
         assert "1901" in status
-        assert "Spring Diplomacy" in status
+        assert "Spring" in status
 
     def test_contains_all_powers(self, state):
         status = format_status(state)
@@ -496,3 +506,39 @@ class TestStartingPositions:
     def test_total_starting_units(self):
         total = sum(len(u) for u in STARTING_UNITS.values())
         assert total == 22  # 3*6 + 4 (Russia)
+
+
+class TestSessions:
+    def test_load_sessions_empty(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        sessions = load_sessions(game_dir)
+        assert sessions == {}
+
+    def test_save_and_load_sessions(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        sessions = {"France": {"id": "abc-123", "started": True}}
+        save_sessions(sessions, game_dir)
+        loaded = load_sessions(game_dir)
+        assert loaded == sessions
+
+    def test_get_session_id_creates_new(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        sid = get_session_id(game_dir, "France")
+        assert isinstance(sid, str)
+        assert len(sid) == 36  # UUID format
+
+    def test_get_session_id_returns_existing(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        sid1 = get_session_id(game_dir, "France")
+        sid2 = get_session_id(game_dir, "France")
+        assert sid1 == sid2
+
+    def test_mark_session_started(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        get_session_id(game_dir, "France")
+        sessions = load_sessions(game_dir)
+        assert sessions["France"]["started"] is False
+
+        mark_session_started(game_dir, "France")
+        sessions = load_sessions(game_dir)
+        assert sessions["France"]["started"] is True

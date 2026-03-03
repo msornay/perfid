@@ -1,4 +1,4 @@
-.PHONY: test test-local lint lint-local deploy new bootstrap play status destroy
+.PHONY: test test-local test-full-game lint lint-local deploy new bootstrap play status destroy
 
 test:
 	docker build -f Dockerfile.test -t perfid-test .
@@ -7,6 +7,9 @@ test:
 test-local:
 	python3 -m pytest -v test_gpg.py test_logger.py test_game_state.py test_message_router.py test_orders.py test_prompt.py test_jdip_adapter.py
 	bash test_perfid
+
+test-full-game:
+	bash test_full_game
 
 lint:
 	docker build -f Dockerfile.test -t perfid-test .

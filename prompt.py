@@ -7,8 +7,7 @@ Diplomacy, use GPG encryption, and interact with the game filesystem.
 Prompt types:
   - system_prompt: one-time rules, GPG workflow, file layout
   - bootstrap_prompt: generate GPG key, publish public key
-  - negotiation_prompt: read inbox, compose encrypted messages
-  - order_prompt: analyze position, submit encrypted orders
+  - season_turn_prompt: free-form turn (negotiate + submit orders)
   - retreat_prompt: choose retreat destinations or disband
   - adjustment_prompt: choose builds/disbands for winter
 """
@@ -23,6 +22,7 @@ from game_state import (
     state_for_power,
 )
 from message_router import list_inbox
+from orders import has_submitted
 
 
 def _format_units(units):
@@ -75,8 +75,7 @@ def _format_inbox(messages):
     lines = []
     for msg in messages:
         lines.append(
-            f"  From {msg['sender']}, round {msg['round']}, "
-            f"seq {msg['seq']}: {msg['path']}"
+            f"  From {msg['sender']}: {msg['path']}"
         )
     return "\n".join(lines)
 
@@ -90,7 +89,11 @@ def _format_dislodged(dislodged, power):
     for d in own:
         u = d["unit"]
         retreats = d.get("retreats", [])
-        retreat_str = ", ".join(retreats) if retreats else "(none — must disband)"
+        retreat_str = (
+            ", ".join(retreats)
+            if retreats
+            else "(none — must disband)"
+        )
         lines.append(
             f"  {u['type']} {u['location']} — "
             f"can retreat to: {retreat_str}"
@@ -98,10 +101,35 @@ def _format_dislodged(dislodged, power):
     return "\n".join(lines)
 
 
+def _format_submitted(game_dir, state):
+    """Format which powers have already submitted orders."""
+    year = state["year"]
+    phase = state["phase"]
+    submitted = []
+    pending = []
+    for power in POWERS:
+        if power in state.get("eliminated", []):
+            continue
+        if has_submitted(game_dir, power, year, phase):
+            submitted.append(power)
+        else:
+            pending.append(power)
+    lines = []
+    if submitted:
+        lines.append(
+            f"  Submitted: {', '.join(submitted)}"
+        )
+    if pending:
+        lines.append(
+            f"  Pending: {', '.join(pending)}"
+        )
+    return "\n".join(lines)
+
+
 SYSTEM_PROMPT = """\
 You are a Diplomacy AI agent playing as {power} in a 7-player standard \
 Diplomacy game. You are one of 7 independent AI agents, each running in \
-an isolated Docker container.
+a shared Docker container with isolated GPG keyrings.
 
 # Diplomacy Rules Summary
 
@@ -111,19 +139,25 @@ control of supply centers (SCs). The first power to control 18 of the \
 34 SCs wins a solo victory.
 
 ## Phases (each game year)
-1. **Spring Diplomacy** — negotiate with other powers via encrypted messages
-2. **Spring Movement** — submit orders for your units
-3. **Spring Retreat** — retreat or disband dislodged units
-4. **Fall Diplomacy** — negotiate again
-5. **Fall Movement** — submit orders
-6. **Fall Retreat** — retreat or disband
-7. **Winter Adjustment** — build new units or disband excess
+1. **Spring** — negotiate with other powers and submit movement orders
+2. **Spring Retreat** — retreat or disband dislodged units
+3. **Fall** — negotiate with other powers and submit movement orders
+4. **Fall Retreat** — retreat or disband
+5. **Winter Adjustment** — build new units or disband excess
+
+## Free-form Turns (Spring & Fall)
+
+On your turn you can send messages to negotiate, use jDip to simulate \
+strategies, or submit your final movement orders. Once you submit \
+orders your turn is done for the season. You will be called multiple \
+times during a season — each call is a chance to read new messages, \
+send replies, and decide whether to submit orders now or wait.
 
 ## Unit Types
 - **Army (A)** — moves on land
 - **Fleet (F)** — moves on sea and coastal provinces
 
-## Order Types (Movement phases)
+## Order Types (Spring & Fall)
 - **Move**: `A Paris - Burgundy` or `F London - North Sea`
 - **Hold**: `A Paris H`
 - **Support**: `A Munich S A Berlin - Silesia` (support a move) \
@@ -145,7 +179,12 @@ Builds can only be placed in your **home supply centers** that are \
 # Communication Protocol
 
 All inter-agent communication uses GPG encryption. Your private key \
-is in your container and NEVER leaves it.
+is injected at the start of each turn and removed afterwards.
+
+**CRITICAL: NEVER write plaintext to disk.** All messages, orders, and \
+notes MUST be GPG-encrypted. Other agents share the filesystem and can \
+read any unencrypted file. If gpg encryption fails, do NOT fall back to \
+writing plaintext — diagnose and fix the gpg command instead.
 
 ## Sending messages
 1. Compose your message as plaintext
@@ -155,7 +194,7 @@ is in your container and NEVER leaves it.
        --recipient <recipient>@perfid.local \\
        --output messages/outbox/{power}/<filename>.gpg
    ```
-   Use filename format: `{power}-to-<recipient>-<phase>-r<round>-<seq>.gpg`
+   Use filename format: `{power}-to-<recipient>-<phase>-r1-<seq>.gpg`
 
 ## Reading messages
 1. List your inbox: `ls messages/inbox/{power}/`
@@ -178,7 +217,8 @@ is in your container and NEVER leaves it.
    ```
 
 ## Private notes
-Encrypt notes with your own key to persist thoughts across turns:
+Encrypt notes with your own key to persist thoughts across turns. \
+NEVER write unencrypted notes — other agents can read the filesystem.
 ```
 gpg --armor --encrypt --trust-model always \\
     --recipient {power_lower}@perfid.local \\
@@ -191,7 +231,8 @@ You have access to jDip, a DATC-compliant Diplomacy adjudicator, to test \
 order combinations **before** committing. Use it to evaluate strategies:
 
 ```python
-import json
+import json, sys
+sys.path.insert(0, '/perfid')
 from jdip_adapter import simulate
 
 state = json.load(open("state.json"))
@@ -216,6 +257,7 @@ state**, so you can safely test many combinations. Use it to:
 
 # File Layout
 ```
+/perfid/              — game engine (read-only mount)
 pubkeys/              — public keys for all powers + GM
 messages/
   inbox/{power}/      — your incoming encrypted messages
@@ -342,107 +384,8 @@ def bootstrap_prompt(power):
     )
 
 
-NEGOTIATION_PROMPT = """\
-# {phase} — Round {round_num} of {max_rounds}
-
-**Year**: {year} | **Phase**: {phase} | **Round**: {round_num}/{max_rounds}
-
-## Current Board Position
-
-### Units
-{all_units}
-
-### Supply Center Ownership
-{sc_ownership}
-
-### Your Position
-- **Power**: {power}
-- **Your units**:
-{your_units}
-- **Your SCs**: {your_sc_count}
-
-## Your Inbox (this round)
-{inbox}
-
-## Instructions
-
-This is a **negotiation round**. You should:
-
-1. **Read** any messages in your inbox by decrypting them:
-   ```
-   gpg --decrypt messages/inbox/{power}/<filename>.gpg
-   ```
-
-2. **Analyze** the board position and other powers' likely intentions.
-
-3. **Compose and send** messages to other powers. For each message:
-   - Write your message as plaintext
-   - Encrypt with the recipient's public key
-   - Write to your outbox with the correct filename
-
-   Example (sending to France):
-   ```
-   echo "Your message here" | gpg --armor --encrypt --trust-model always \\
-       --recipient france@perfid.local \\
-       --output messages/outbox/{power}/{power}-to-France-{phase_label}-r{round_num}-1.gpg
-   ```
-
-4. **Write private notes** to yourself about your strategy (encrypted \
-with your own key) so you can reference them in later turns.
-
-Remember: **you are playing to WIN (18 SCs), not to make friends.**
-- You can send messages to any power (including ones you're not allied with)
-- Other powers may lie — verify claims against the board state
-- Every negotiation should advance YOUR position: propose deals that \
-benefit you more, pit rivals against each other, set up future stabs
-- This is round {round_num} of {max_rounds} — {round_advice}\
-"""
-
-
-def negotiation_prompt(power, state, game_dir, round_num, max_rounds):
-    """Generate the negotiation prompt for a diplomacy phase.
-
-    Args:
-        power: Diplomacy power name.
-        state: Current game state dict.
-        game_dir: Path to game directory.
-        round_num: Current negotiation round (1-indexed).
-        max_rounds: Total negotiation rounds this phase.
-
-    Returns:
-        Negotiation prompt string.
-    """
-    phase = state["phase"]
-    phase_label = phase.replace(" ", "_")
-
-    inbox = list_inbox(game_dir, power, phase=phase, round_num=round_num)
-
-    pview = state_for_power(state, power)
-
-    round_advice = (
-        "use remaining rounds wisely"
-        if round_num < max_rounds
-        else "this is the last round before orders"
-    )
-
-    return NEGOTIATION_PROMPT.format(
-        power=power,
-        year=state["year"],
-        phase=phase,
-        phase_label=phase_label,
-        round_num=round_num,
-        max_rounds=max_rounds,
-        all_units=_format_all_units(state),
-        sc_ownership=_format_sc_ownership(state),
-        your_units=_format_units(pview["your_units"]),
-        your_sc_count=pview["your_sc_count"],
-        inbox=_format_inbox(inbox),
-        round_advice=round_advice,
-    )
-
-
-ORDER_PROMPT = """\
-# {phase} — Submit Your Orders
+SEASON_TURN_PROMPT = """\
+# {phase} {year} — Your Turn
 
 **Year**: {year} | **Phase**: {phase}
 
@@ -460,10 +403,32 @@ ORDER_PROMPT = """\
 {your_units}
 - **Your SCs**: {your_sc_count}
 
+## Your Inbox
+{inbox}
+
+## Order Submission Status
+{submitted_status}
+
 ## Instructions
 
-Submit your **movement orders** for all your units. Each unit must \
-receive exactly one order. Units without orders will default to Hold.
+This is a **free-form turn**. You may:
+
+1. **Read** any messages in your inbox by decrypting them:
+   ```
+   gpg --decrypt messages/inbox/{power}/<filename>.gpg
+   ```
+
+2. **Send messages** to negotiate with other powers:
+   ```
+   echo "Your message here" | gpg --armor --encrypt --trust-model always \\
+       --recipient <recipient>@perfid.local \\
+       --output messages/outbox/{power}/{power}-to-<Recipient>-{phase_label}-r1-<seq>.gpg
+   ```
+
+3. **Use jDip** to simulate order combinations and test strategies.
+
+4. **Submit your final orders** when ready. Once submitted, your turn \
+is done for this season.
 
 ### Order format
 Write your orders as a JSON object and encrypt with the GM's public key:
@@ -503,8 +468,11 @@ ORDERS
 """
 
 
-def order_prompt(power, state, game_dir):
-    """Generate the order submission prompt.
+def season_turn_prompt(power, state, game_dir):
+    """Generate the free-form season turn prompt.
+
+    Replaces the separate negotiation and order prompts. On each
+    call the agent can negotiate, simulate, or submit orders.
 
     Args:
         power: Diplomacy power name.
@@ -512,20 +480,26 @@ def order_prompt(power, state, game_dir):
         game_dir: Path to game directory.
 
     Returns:
-        Order prompt string.
+        Season turn prompt string.
     """
     phase = state["phase"]
     phase_label = phase.replace(" ", "_")
     pview = state_for_power(state, power)
+
+    inbox = list_inbox(game_dir, power)
 
     # Build example orders from the power's actual units
     example_lines = []
     for u in pview["your_units"]:
         ut = u["type"][0]  # "A" or "F"
         example_lines.append(f'    "{ut} {u["location"]} H"')
-    example_orders = ",\n".join(example_lines) if example_lines else '    "Waive"'
+    example_orders = (
+        ",\n".join(example_lines)
+        if example_lines
+        else '    "Waive"'
+    )
 
-    return ORDER_PROMPT.format(
+    return SEASON_TURN_PROMPT.format(
         power=power,
         year=state["year"],
         phase=phase,
@@ -534,6 +508,8 @@ def order_prompt(power, state, game_dir):
         sc_ownership=_format_sc_ownership(state),
         your_units=_format_units(pview["your_units"]),
         your_sc_count=pview["your_sc_count"],
+        inbox=_format_inbox(inbox),
+        submitted_status=_format_submitted(game_dir, state),
         example_orders=example_orders,
     )
 
@@ -684,13 +660,20 @@ def adjustment_prompt(power, state, game_dir):
 
     # Determine adjustment type
     if diff > 0:
-        adjustment_desc = f"**Build {diff} unit{'s' if diff != 1 else ''}**"
-        adjustment_instructions = _build_instructions(power, state, diff)
+        adjustment_desc = (
+            f"**Build {diff} unit{'s' if diff != 1 else ''}**"
+        )
+        adjustment_instructions = _build_instructions(
+            power, state, diff
+        )
     elif diff < 0:
         adjustment_desc = (
-            f"**Disband {abs(diff)} unit{'s' if abs(diff) != 1 else ''}**"
+            f"**Disband {abs(diff)} "
+            f"unit{'s' if abs(diff) != 1 else ''}**"
         )
-        adjustment_instructions = _disband_instructions(power, units, diff)
+        adjustment_instructions = _disband_instructions(
+            power, units, diff
+        )
     else:
         adjustment_desc = "**No adjustment needed** (units == SCs)"
         adjustment_instructions = (
@@ -711,11 +694,17 @@ def adjustment_prompt(power, state, game_dir):
         owned = state["sc_ownership"].get(hc) == power
         occupied = hc in occupied_locs
         if owned and not occupied:
-            home_status_lines.append(f"  {hc} — available for build")
+            home_status_lines.append(
+                f"  {hc} — available for build"
+            )
         elif owned and occupied:
-            home_status_lines.append(f"  {hc} — occupied (cannot build)")
+            home_status_lines.append(
+                f"  {hc} — occupied (cannot build)"
+            )
         else:
-            home_status_lines.append(f"  {hc} — not owned (cannot build)")
+            home_status_lines.append(
+                f"  {hc} — not owned (cannot build)"
+            )
     home_center_status = "\n".join(home_status_lines)
 
     # Format owned SCs
@@ -723,13 +712,18 @@ def adjustment_prompt(power, state, game_dir):
         sc for sc, owner in state["sc_ownership"].items()
         if owner == power
     )
-    your_scs = "  " + ", ".join(owned_scs) if owned_scs else "  (none)"
+    your_scs = (
+        "  " + ", ".join(owned_scs) if owned_scs else "  (none)"
+    )
 
     # Example orders
     if diff > 0:
         available = [
             hc for hc in home_centers
-            if state["sc_ownership"].get(hc) == power and hc not in occupied_locs
+            if (
+                state["sc_ownership"].get(hc) == power
+                and hc not in occupied_locs
+            )
         ]
         examples = []
         for hc in available[:diff]:
@@ -741,8 +735,12 @@ def adjustment_prompt(power, state, game_dir):
         examples = []
         for u in units[:abs(diff)]:
             ut = u["type"][0]
-            examples.append(f'    "Disband {ut} {u["location"]}"')
-        example_orders = ",\n".join(examples) if examples else '    "Waive"'
+            examples.append(
+                f'    "Disband {ut} {u["location"]}"'
+            )
+        example_orders = (
+            ",\n".join(examples) if examples else '    "Waive"'
+        )
     else:
         example_orders = '    "Waive"'
 
@@ -771,13 +769,17 @@ def _build_instructions(power, state, builds):
     }
     available = [
         hc for hc in home_centers
-        if state["sc_ownership"].get(hc) == power and hc not in occupied_locs
+        if (
+            state["sc_ownership"].get(hc) == power
+            and hc not in occupied_locs
+        )
     ]
     n_available = len(available)
 
     lines = [
         f"You may build up to **{builds}** new unit(s).",
-        "Choose wisely — every build should support your push toward 18 SCs.",
+        "Choose wisely — every build should support your push "
+        "toward 18 SCs.",
         "",
         "Build rules:",
         "- Builds can only be placed in your **home supply centers**",
@@ -827,35 +829,24 @@ def _disband_instructions(power, units, diff):
     return "\n".join(lines)
 
 
-def turn_context(power, state, game_dir, round_num=None,
-                 max_rounds=None):
-    """Generate the appropriate per-turn prompt based on current phase.
+def turn_context(power, state, game_dir):
+    """Generate the appropriate per-turn prompt based on phase.
 
-    Dispatches to the correct prompt generator based on the game phase.
+    Dispatches to the correct prompt generator based on the game
+    phase.
 
     Args:
         power: Diplomacy power name.
         state: Current game state dict.
         game_dir: Path to game directory.
-        round_num: Negotiation round (required for diplomacy phases).
-        max_rounds: Total negotiation rounds (required for diplomacy phases).
 
     Returns:
         Turn-specific prompt string.
     """
     phase = Phase(state["phase"])
 
-    if phase in (Phase.SPRING_DIPLOMACY, Phase.FALL_DIPLOMACY):
-        if round_num is None or max_rounds is None:
-            raise ValueError(
-                "round_num and max_rounds required for diplomacy phases"
-            )
-        return negotiation_prompt(
-            power, state, game_dir, round_num, max_rounds
-        )
-
-    if phase in (Phase.SPRING_MOVEMENT, Phase.FALL_MOVEMENT):
-        return order_prompt(power, state, game_dir)
+    if phase in (Phase.SPRING, Phase.FALL):
+        return season_turn_prompt(power, state, game_dir)
 
     if phase in (Phase.SPRING_RETREAT, Phase.FALL_RETREAT):
         return retreat_prompt(power, state, game_dir)

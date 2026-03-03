@@ -253,10 +253,7 @@ def _unit_matches(unit_dict, unit_type, location):
 
 # Phase categories for order type validation
 _MOVEMENT_PHASES = {
-    Phase.SPRING_MOVEMENT, Phase.FALL_MOVEMENT,
-}
-_DIPLOMACY_PHASES = {
-    Phase.SPRING_DIPLOMACY, Phase.FALL_DIPLOMACY,
+    Phase.SPRING, Phase.FALL,
 }
 _RETREAT_PHASES = {
     Phase.SPRING_RETREAT, Phase.FALL_RETREAT,
@@ -309,21 +306,22 @@ def validate_order(order_str, power, state):
         if order_type not in _ADJUSTMENT_ORDER_TYPES:
             return (False, parsed,
                     f"Order type '{order_type}' not valid in {phase.value}")
-    elif phase in _DIPLOMACY_PHASES:
-        # No orders during diplomacy phases (only negotiation)
-        return (False, parsed,
-                f"No orders accepted during {phase.value}")
-
     # Unit ownership check (for orders that reference a unit)
+    # During retreat phases, dislodged units are in state["dislodged"],
+    # not state["units"] — skip this check and use the dislodged check
+    # below instead.
     if order_type in _MOVEMENT_ORDER_TYPES | {"retreat_disband"}:
-        units = state["units"].get(power, [])
-        unit_type = parsed["unit_type"]
-        location = parsed["location"]
-        if not any(_unit_matches(u, unit_type, location) for u in units):
-            return (False, parsed,
-                    f"{power} has no {unit_type} at {location}")
+        if phase not in _RETREAT_PHASES:
+            units = state["units"].get(power, [])
+            unit_type = parsed["unit_type"]
+            location = parsed["location"]
+            if not any(
+                _unit_matches(u, unit_type, location) for u in units
+            ):
+                return (False, parsed,
+                        f"{power} has no {unit_type} at {location}")
 
-    # For retreat orders, also check the unit is in the dislodged list
+    # For retreat orders, check the unit is in the dislodged list
     if phase in _RETREAT_PHASES and order_type in ("move", "retreat_disband"):
         dislodged = state.get("dislodged", [])
         unit_type = parsed["unit_type"]
@@ -466,10 +464,6 @@ def decrypt_orders(game_dir, power, year, phase, gm_gnupghome):
 
     plaintext = gpg_mod.decrypt_file(gm_gnupghome, str(gpg_path))
     order_data = json.loads(plaintext)
-
-    # Write decrypted JSON for the record
-    json_path = orders_d / f"{power}.json"
-    json_path.write_text(json.dumps(order_data, indent=2) + "\n")
 
     return order_data
 
@@ -648,5 +642,17 @@ def list_notes(game_dir, power):
             "path": str(f),
         })
 
-    notes.sort(key=lambda n: (n["year"], phase_index.get(n["phase"], 99)))
+    def _sort_key(n):
+        idx = phase_index.get(n["phase"])
+        if idx is not None:
+            return (n["year"], idx)
+        # Free-form phases like "Spring Diplomacy": sort by season
+        p = n["phase"]
+        if p.startswith("Spring"):
+            return (n["year"], 0.5)
+        if p.startswith("Fall"):
+            return (n["year"], 2.5)
+        return (n["year"], 99)
+
+    notes.sort(key=_sort_key)
     return notes

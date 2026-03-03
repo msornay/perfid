@@ -24,9 +24,11 @@ _JDIP_LIB = _JDIP_DIR / "lib"
 
 # Phase brief name mapping: perfid phase labels -> jDip 6-char codes
 _PHASE_MAP = {
+    "Spring": "S{year}M",
     "Spring Diplomacy": "S{year}M",
     "Spring Movement": "S{year}M",
     "Spring Retreat": "S{year}R",
+    "Fall": "F{year}M",
     "Fall Diplomacy": "F{year}M",
     "Fall Movement": "F{year}M",
     "Fall Retreat": "F{year}R",

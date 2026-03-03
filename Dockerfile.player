@@ -1,10 +1,18 @@
 FROM node:20-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gnupg \
+    && apt-get install -y --no-install-recommends \
+       gnupg python3 default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
+
+# GPG wrapper that logs plaintext before encrypting
+RUN mv /usr/bin/gpg /usr/bin/gpg.real
+COPY gpg-wrapper.sh /usr/bin/gpg
+RUN chmod +x /usr/bin/gpg
+
+RUN useradd -m player
 
 WORKDIR /game
 

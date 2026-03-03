@@ -638,7 +638,7 @@ class TestSimulate:
         from game_state import new_game
 
         state = new_game("test-sim", "/tmp/test-sim")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
         original_units = {
             p: list(u) for p, u in state["units"].items()
         }
@@ -648,7 +648,7 @@ class TestSimulate:
         })
 
         # State should be unchanged
-        assert state["phase"] == "Spring Movement"
+        assert state["phase"] == "Spring"
         for power in original_units:
             assert len(state["units"][power]) == len(
                 original_units[power]
@@ -659,7 +659,7 @@ class TestSimulate:
         from game_state import new_game
 
         state = new_game("test-sim2", "/tmp/test-sim2")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         result = simulate(state, {
             "France": ["A Paris - Burgundy"],
@@ -674,7 +674,7 @@ class TestSimulate:
         from game_state import new_game
 
         state = new_game("test-sim3", "/tmp/test-sim3")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         result = simulate(state, {
             "France": [
@@ -695,7 +695,7 @@ class TestSimulate:
         from game_state import new_game
 
         state = new_game("test-sim4", "/tmp/test-sim4")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         # Two powers try to move to the same province
         result = simulate(state, {
@@ -718,7 +718,7 @@ class TestGameStateIntegration:
         from game_state import adjudicate, new_game
 
         state = new_game("test-jdip", "/tmp/test-jdip-game")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         orders = {
             "France": [
@@ -767,14 +767,14 @@ class TestGameStateIntegration:
         }
         assert "Burgundy" in fr_locs
         assert "English Channel" in fr_locs
-        assert state["phase"] != "Spring Movement"
+        assert state["phase"] != "Spring"
 
     def test_adjudicate_checks_elimination(self):
         """adjudicate() marks powers with 0 SCs as eliminated."""
         from game_state import adjudicate, new_game
 
         state = new_game("test-elim", "/tmp/test-jdip-elim")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         state["units"] = {
             "France": [{"type": "Army", "location": "Paris"}],
@@ -808,13 +808,13 @@ class TestGameStateIntegration:
         from game_state import adjudicate, new_game
 
         state = new_game("test-phase", "/tmp/test-jdip-phase")
-        state["phase"] = "Spring Movement"
+        state["phase"] = "Spring"
 
         orders = {"France": ["A Paris Hold"]}
         state = adjudicate(state, orders)
 
         # Should have advanced past Spring Movement
-        assert state["phase"] != "Spring Movement"
+        assert state["phase"] != "Spring"
 
 
 class TestLocationNormalization:
