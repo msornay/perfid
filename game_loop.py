@@ -25,7 +25,6 @@ from game_state import (
     adjustment_counts,
     apply_adjustments,
     apply_retreats,
-    check_win,
     format_status,
     load_state,
     load_sessions,
@@ -33,7 +32,6 @@ from game_state import (
     mark_session_started,
     next_phase,
     save_state,
-    skip_retreat_if_empty,
 )
 from logger import GameLogger
 from message_router import (
@@ -43,7 +41,6 @@ from message_router import (
 from orders import (
     collect_from_dropbox,
     collect_orders,
-    default_orders,
     has_submitted,
 )
 from prompt import system_prompt, turn_context
@@ -496,7 +493,6 @@ def route_and_log_messages(ctx, power, state):
         state: Current game state dict.
     """
     game_dir = ctx["game_dir"]
-    gm_gnupghome = ctx["gm_gnupghome"]
     logger = ctx["logger"]
 
     routed = route_messages(game_dir, power)
@@ -589,7 +585,7 @@ def _movement_phase(ctx, state):
             if i < start_index:
                 continue
 
-            print(f"  {power}'s turn (round {round_num})...")
+            print(f"\n  === {power.upper()} (round {round_num}) ===")
 
             setup_turn_gpg(ctx, power)
 
@@ -656,7 +652,6 @@ def _retreat_phase(ctx, state):
         state: Current game state dict.
     """
     game_dir = ctx["game_dir"]
-    logger = ctx["logger"]
     year = state["year"]
     phase = state["phase"]
     dislodged = state.get("dislodged", [])
@@ -681,7 +676,7 @@ def _retreat_phase(ctx, state):
         if i < start_index:
             continue
 
-        print(f"  {power} submitting retreats...")
+        print(f"\n  === {power.upper()} — retreat ===")
 
         dropbox = _dropbox_path(power)
         os.makedirs(dropbox, mode=0o700, exist_ok=True)
@@ -727,7 +722,6 @@ def _winter_phase(ctx, state):
         state: Current game state dict.
     """
     game_dir = ctx["game_dir"]
-    logger = ctx["logger"]
     year = state["year"]
     phase = state["phase"]
 
@@ -746,7 +740,7 @@ def _winter_phase(ctx, state):
         if i < start_index:
             continue
 
-        print(f"  {power} submitting adjustments...")
+        print(f"\n  === {power.upper()} — adjustments ===")
 
         dropbox = _dropbox_path(power)
         os.makedirs(dropbox, mode=0o700, exist_ok=True)
@@ -802,6 +796,9 @@ def adjudicate_movement(ctx, state):
     # Reload state (agents may have changed it — though they shouldn't)
     state = load_state(game_dir)
 
+    # Snapshot SC ownership before adjudication for change detection
+    sc_before = dict(state.get("sc_ownership", {}))
+
     # Collect and decrypt orders
     collected = collect_orders(
         game_dir, year, phase, gm_gnupghome, state
@@ -817,6 +814,13 @@ def adjudicate_movement(ctx, state):
                 print(f"  {power} order error: {order} — {msg}",
                       file=sys.stderr)
 
+    # Print submitted orders
+    for power in sorted(all_orders):
+        orders = all_orders[power]
+        print(f"  {power} orders:")
+        for o in orders:
+            print(f"    {o}")
+
     # Log submitted orders
     for power, orders in all_orders.items():
         logger.orders_submitted(power, orders, phase)
@@ -827,10 +831,49 @@ def adjudicate_movement(ctx, state):
     order_results = state.pop("order_results", [])
     logger.adjudication_result(phase, order_results)
 
+    # Print per-order results
+    if order_results:
+        print("  Order results:")
+        for r in order_results:
+            status = r.get("result", "unknown")
+            msg = r.get("message", "")
+            detail = f" ({msg})" if msg else ""
+            print(f"    {r.get('order', '?')}: {status}{detail}")
+
+    # Print dislodged units
+    dislodged = state.get("dislodged", [])
+    if dislodged:
+        print("  Dislodged units:")
+        for d in dislodged:
+            retreats = ", ".join(d.get("retreats", []))
+            print(f"    {d['power']} {d['unit']['type']} "
+                  f"{d['unit']['location']}"
+                  f" (can retreat to: {retreats or 'none — must disband'})")
+
+    # Print SC ownership changes
+    sc_after = state.get("sc_ownership", {})
+    sc_changes = []
+    for sc in sorted(set(list(sc_before) + list(sc_after))):
+        old = sc_before.get(sc)
+        new = sc_after.get(sc)
+        if old != new:
+            if old:
+                sc_changes.append(f"    {sc}: {old} -> {new}")
+            else:
+                sc_changes.append(f"    {sc}: neutral -> {new}")
+    if sc_changes:
+        print("  SC ownership changes:")
+        for c in sc_changes:
+            print(c)
+
     _log(logger, "adjudication", year=year, phase=phase,
          order_results=order_results,
-         dislodged=state.get("dislodged", []),
-         resolved_units=state["units"])
+         dislodged=dislodged,
+         resolved_units=state["units"],
+         sc_changes={sc: {"from": sc_before.get(sc),
+                          "to": sc_after.get(sc)}
+                     for sc in set(list(sc_before) + list(sc_after))
+                     if sc_before.get(sc) != sc_after.get(sc)})
 
     print(f"  Phase advanced to: {state['year']} {state['phase']}")
 
@@ -879,6 +922,18 @@ def apply_retreats_and_advance(ctx, state):
                 "unit": d["unit"],
                 "action": "disband",
             })
+
+    # Print retreat actions
+    if retreat_orders:
+        print("  Retreat results:")
+        for r in retreat_orders:
+            unit = r["unit"]
+            if r["action"] == "retreat":
+                print(f"    {r['power']} {unit['type']} "
+                      f"{unit['location']} -> {r['destination']}")
+            else:
+                print(f"    {r['power']} {unit['type']} "
+                      f"{unit['location']} disbanded")
 
     state = apply_retreats(state, retreat_orders, game_dir)
     _log(logger, "retreats_applied", year=year, phase=phase,
@@ -944,8 +999,26 @@ def apply_adjustments_and_advance(ctx, state):
         if actions:
             adjustments[power] = actions
 
+    # Print adjustment summary
+    if adj_counts:
+        print("  Adjustment counts:")
+        for power in sorted(adj_counts):
+            count = adj_counts[power]
+            if count > 0:
+                print(f"    {power}: +{count} build(s)")
+            elif count < 0:
+                print(f"    {power}: {count} disband(s)")
+    if adjustments:
+        print("  Adjustments applied:")
+        for power in sorted(adjustments):
+            for a in adjustments[power]:
+                unit = a["unit"]
+                print(f"    {power} {a['action']} "
+                      f"{unit['type']} {unit['location']}")
+
     state = apply_adjustments(state, adjustments, game_dir)
     _log(logger, "adjustments_applied", year=year, phase=phase,
+         adjustment_counts=adj_counts,
          adjustments=adjustments,
          units=state["units"])
     state = next_phase(state)
