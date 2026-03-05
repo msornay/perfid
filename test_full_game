@@ -441,6 +441,95 @@ print(found)
 fi
 
 echo ""
+echo "--- Verbose output assertions ---"
+
+if [[ -f "$TEST_WS/play.log" ]]; then
+    # Uppercase turn headers from game_loop
+    if grep -q '=== [A-Z].* (round [0-9])' "$TEST_WS/play.log"; then
+        ok "play.log has uppercase turn headers"
+    else
+        ko "play.log missing uppercase turn headers"
+    fi
+
+    # Per-order adjudication results (jDip returns lowercase statuses)
+    if grep -q 'Order results:' "$TEST_WS/play.log"; then
+        ok "play.log has per-order adjudication results"
+    else
+        ko "play.log missing per-order adjudication results"
+    fi
+
+    # Dislodged units reported
+    if grep -q 'Dislodged:' "$TEST_WS/play.log"; then
+        ok "play.log reports dislodged units"
+    else
+        ko "play.log missing dislodged unit reports"
+    fi
+
+    # SC ownership changes reported
+    if grep -q 'SC ownership changes:' "$TEST_WS/play.log"; then
+        ok "play.log reports SC ownership changes"
+    else
+        ko "play.log missing SC ownership changes"
+    fi
+
+    # Adjustment counts reported
+    if grep -qE '\+[0-9]+ build' "$TEST_WS/play.log"; then
+        ok "play.log reports adjustment counts"
+    else
+        ko "play.log missing adjustment counts"
+    fi
+else
+    ko "play.log not found"
+fi
+
+echo ""
+echo "--- JSONL feature assertions ---"
+
+if [[ -f "$gd/log.jsonl" ]]; then
+    # adjudication events have sc_changes field
+    has_sc_changes=$(python3 -c "
+import json
+found = False
+with open('$gd/log.jsonl') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e.get('event') == 'adjudication' and 'sc_changes' in e:
+                found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$has_sc_changes" == "True" ]]; then
+        ok "adjudication events have sc_changes field"
+    else
+        ko "adjudication events missing sc_changes field"
+    fi
+
+    # adjustments_applied events have adjustment_counts field
+    has_adj_counts=$(python3 -c "
+import json
+found = False
+with open('$gd/log.jsonl') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e.get('event') == 'adjustments_applied' and 'adjustment_counts' in e:
+                found = True
+                break
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(found)
+")
+    if [[ "$has_adj_counts" == "True" ]]; then
+        ok "adjustments_applied events have adjustment_counts field"
+    else
+        ko "adjustments_applied events missing adjustment_counts field"
+    fi
+fi
+
+echo ""
 echo "--- Security assertions ---"
 
 if [[ ! -f "$gd/master.passphrase" ]]; then ok "master.passphrase never created"
