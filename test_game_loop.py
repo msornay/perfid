@@ -325,6 +325,68 @@ class TestRunAgent:
         assert len(dropbox_arg) == 1
         assert "/tmp/orders-france" in dropbox_arg[0]
 
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_agent_sim_log_env_passed(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        """PERFID_SIM_LOG env var is passed to the agent."""
+        mock_popen.side_effect = mock_popen_factory("output")
+        game_loop.run_agent(ctx, "England", "prompt")
+        cmd = mock_popen.call_args.args[0]
+        sim_arg = [a for a in cmd if "PERFID_SIM_LOG=" in a]
+        assert len(sim_arg) == 1
+        assert game_loop.SIM_LOG_PATH in sim_arg[0]
+
+    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
+    @patch("game_loop.subprocess.Popen")
+    def test_sidecar_records_collected_into_log(
+        self, mock_popen, mock_enc, ctx, game_dir
+    ):
+        """Simulation sidecar records are encrypted and logged."""
+        # Write a sidecar file before running agent
+        sidecar = game_loop.SIM_LOG_PATH
+        record = json.dumps({
+            "ts": "2026-01-01T00:00:00+00:00",
+            "phase": "Spring", "year": 1901,
+            "orders": {"France": ["A Paris - Burgundy"]},
+            "order_results": [], "summary": {},
+        })
+        os.makedirs(os.path.dirname(sidecar), exist_ok=True)
+
+        def popen_writes_sidecar(cmd, **kwargs):
+            fh = kwargs.get("stdout")
+            if fh and hasattr(fh, "write"):
+                fh.write("agent output")
+            # Simulate the agent writing to the sidecar
+            with open(sidecar, "w") as f:
+                f.write(record + "\n")
+            proc = MagicMock()
+            proc.poll.return_value = 0
+            proc.returncode = 0
+            proc.pid = 99999
+            return proc
+
+        mock_popen.side_effect = popen_writes_sidecar
+        game_loop.run_agent(ctx, "France", "prompt")
+
+        # Sidecar should be deleted after collection
+        assert not os.path.exists(sidecar)
+
+        # Check that simulation_run event was logged
+        log_path = os.path.join(game_dir, "log.jsonl")
+        with open(log_path) as f:
+            events = [json.loads(l) for l in f if l.strip()]
+        sim_events = [
+            e for e in events
+            if e.get("event") == "simulation_run"
+        ]
+        assert len(sim_events) == 1
+        assert sim_events[0]["power"] == "France"
+        assert sim_events[0]["phase"] == "Spring"
+        assert sim_events[0]["year"] == 1901
+        assert "encrypted_data" in sim_events[0]
+
 
 # --- Tests: Route and log messages ---
 
@@ -414,10 +476,10 @@ class TestMovementPhase:
             )
 
         game_loop._movement_phase(ctx, state)
-        # Should have rounds 1, 2, 3, and 4 (when submission checked)
+        # Should have rounds 1, 2, and 3 (when submission checked)
         if round_nums:
             assert min(round_nums) == 1
-            assert max(round_nums) >= 4
+            assert max(round_nums) >= 3
 
     @patch("game_loop.adjudicate_movement")
     @patch("game_loop.run_agent")

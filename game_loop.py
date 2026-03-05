@@ -54,6 +54,9 @@ MIN_NEGOTIATION_ROUNDS = int(os.environ.get("PERFID_MIN_ROUNDS", "2"))
 # Maximum total rounds per movement phase (safety limit)
 MAX_ROUNDS = 10
 
+# Sidecar file for agent simulation logs (written by jdip_adapter.simulate)
+SIM_LOG_PATH = "/tmp/perfid-simulations.jsonl"
+
 # Player home directory and credential paths
 PLAYER_HOME = "/home/player"
 PLAYER_CLAUDE = os.path.join(PLAYER_HOME, ".claude")
@@ -167,6 +170,12 @@ def setup_turn_gpg(ctx, power):
     logger = ctx["logger"]
     lc_power = power.lower()
     gpg_dir = f"/tmp/gpg-{lc_power}"
+
+    # Remove stale simulation sidecar file (crash recovery)
+    try:
+        os.unlink(SIM_LOG_PATH)
+    except OSError:
+        pass
 
     # Remove stale agent sockets from GM keyring (may be from
     # a different container process that ran 'perfid new')
@@ -319,6 +328,54 @@ def cleanup_turn_gpg(ctx, power):
 # --- Agent execution ---
 
 
+def _collect_simulation_log(ctx, power):
+    """Read simulation sidecar file, encrypt and log each record, delete file.
+
+    Args:
+        ctx: Game context dict.
+        power: Diplomacy power name.
+    """
+    if not os.path.exists(SIM_LOG_PATH):
+        return
+
+    gm_gnupghome = ctx["gm_gnupghome"]
+    logger = ctx["logger"]
+
+    try:
+        with open(SIM_LOG_PATH) as f:
+            lines = f.readlines()
+    except OSError:
+        return
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        try:
+            encrypted = gpg_mod.encrypt(
+                gm_gnupghome, line, "gm@perfid.local"
+            )
+        except Exception:
+            encrypted = "(encryption failed)"
+
+        logger.simulation_run(
+            power=power,
+            phase=record.get("phase", ""),
+            year=record.get("year", 0),
+            encrypted_data=encrypted,
+        )
+
+    try:
+        os.unlink(SIM_LOG_PATH)
+    except OSError:
+        pass
+
+
 def run_agent(ctx, power, prompt, env_extra=None):
     """Run the Claude agent for a power's turn.
 
@@ -345,6 +402,7 @@ def run_agent(ctx, power, prompt, env_extra=None):
     env_vars = [
         f"GNUPGHOME={gpg_dir}",
         f"PERFID_GAME_DIR={game_dir}",
+        f"PERFID_SIM_LOG={SIM_LOG_PATH}",
     ]
     if env_extra:
         for k, v in env_extra.items():
@@ -409,6 +467,9 @@ def run_agent(ctx, power, prompt, env_extra=None):
 
     _log(logger, "agent_turn", power=power,
          encrypted_output=encrypted_output)
+
+    # Collect simulation sidecar log (if agent ran any simulations)
+    _collect_simulation_log(ctx, power)
 
     # Print output to stdout for live monitoring
     if output:
@@ -495,9 +556,10 @@ def _movement_phase(ctx, state):
     saved_order = cp["power_order"] if cp else None
 
     if cp:
-        print(f"  Resuming from round {cp['round']}, "
-              f"power {cp['next_index']}/{len(cp['power_order'])} "
-              f"({cp['power_order'][cp['next_index']]})...")
+        skipped = cp['power_order'][:cp['next_index']]
+        print(f"  Resuming round {cp['round']} — "
+              f"skipping {', '.join(skipped)} "
+              f"(already played)")
 
     for round_num in range(start_round, MAX_ROUNDS + 1):
         can_submit = round_num > MIN_NEGOTIATION_ROUNDS
@@ -537,6 +599,7 @@ def _movement_phase(ctx, state):
                     power, state, game_dir,
                     round_num=round_num,
                     dropbox=dropbox,
+                    min_negotiation_rounds=MIN_NEGOTIATION_ROUNDS,
                 )
 
                 env_extra = {}
@@ -609,9 +672,10 @@ def _retreat_phase(ctx, state):
     start_index = cp["next_index"] if cp else 0
 
     if cp:
-        print(f"  Resuming from power {cp['next_index']}"
-              f"/{len(powers_to_act)} "
-              f"({powers_to_act[cp['next_index']]})...")
+        skipped = powers_to_act[:cp['next_index']]
+        if skipped:
+            print(f"  Resuming — skipping {', '.join(skipped)} "
+                  f"(already played)")
 
     for i, power in enumerate(powers_to_act):
         if i < start_index:
@@ -673,8 +737,10 @@ def _winter_phase(ctx, state):
     start_index = cp["next_index"] if cp else 0
 
     if cp:
-        print(f"  Resuming from power {cp['next_index']}"
-              f"/{len(active)} ({active[cp['next_index']]})...")
+        skipped = active[:cp['next_index']]
+        if skipped:
+            print(f"  Resuming — skipping {', '.join(skipped)} "
+                  f"(already played)")
 
     for i, power in enumerate(active):
         if i < start_index:

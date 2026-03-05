@@ -12,6 +12,8 @@ standard Diplomacy scenarios. Covers:
 - Simulate function for agent strategy testing
 """
 
+import os
+
 import pytest
 
 from jdip_adapter import (
@@ -708,6 +710,66 @@ class TestSimulate:
         # Both should fail (bounce)
         assert any(r["result"] == "failure" for r in fr)
         assert any(r["result"] == "failure" for r in de)
+
+
+class TestSimulateSidecarLog:
+    """Tests for simulation sidecar logging via PERFID_SIM_LOG."""
+
+    def test_writes_to_sim_log_when_set(self, tmp_path, monkeypatch):
+        """simulate() writes a JSONL record when PERFID_SIM_LOG is set."""
+        import json
+        from game_state import new_game
+
+        sim_log = str(tmp_path / "sim.jsonl")
+        monkeypatch.setenv("PERFID_SIM_LOG", sim_log)
+
+        state = new_game("test-simlog", str(tmp_path / "game"))
+        state["phase"] = "Spring"
+        simulate(state, {"France": ["A Paris - Burgundy"]})
+
+        assert os.path.exists(sim_log)
+        with open(sim_log) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["phase"] == "Spring"
+        assert record["year"] == 1901
+        assert "France" in record["orders"]
+        assert "order_results" in record
+        assert "summary" in record
+        assert "ts" in record
+
+    def test_appends_multiple_records(self, tmp_path, monkeypatch):
+        """Multiple simulate() calls append to the same file."""
+        import json
+        from game_state import new_game
+
+        sim_log = str(tmp_path / "sim.jsonl")
+        monkeypatch.setenv("PERFID_SIM_LOG", sim_log)
+
+        state = new_game("test-simlog2", str(tmp_path / "game"))
+        state["phase"] = "Spring"
+        simulate(state, {"France": ["A Paris - Burgundy"]})
+        simulate(state, {"France": ["A Paris Hold"]})
+
+        with open(sim_log) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        assert len(lines) == 2
+
+    def test_noop_when_env_unset(self, tmp_path, monkeypatch):
+        """simulate() does not write when PERFID_SIM_LOG is unset."""
+        from game_state import new_game
+
+        monkeypatch.delenv("PERFID_SIM_LOG", raising=False)
+
+        state = new_game("test-simlog3", str(tmp_path / "game"))
+        state["phase"] = "Spring"
+        simulate(state, {"France": ["A Paris - Burgundy"]})
+
+        # No file should be created at any default path
+        assert not os.path.exists(
+            str(tmp_path / "perfid-simulations.jsonl")
+        )
 
 
 class TestGameStateIntegration:

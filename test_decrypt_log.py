@@ -137,6 +137,44 @@ class TestDecryptEvent:
         assert "encrypted" in result  # kept on failure
 
 
+    def test_decrypt_simulation_run(self, gm_home, keys_dir):
+        """simulation_run events: encrypted_data → simulation."""
+        sim_data = json.dumps({
+            "orders": {"France": ["A Paris - Burgundy"]},
+            "order_results": [{"order": "France: A Paris - Burgundy",
+                               "result": "success"}],
+            "summary": {"France": {"units_before": 3, "units_after": 3}},
+        })
+        ct = gpg.encrypt(gm_home, sim_data, "gm@perfid.local")
+        event = {
+            "event": "simulation_run",
+            "power": "France",
+            "phase": "Spring",
+            "year": 1901,
+            "encrypted_data": ct,
+        }
+        result = decrypt_event(event, gm_home, keys_dir, {})
+        assert "simulation" in result
+        assert "encrypted_data" not in result
+        assert result["simulation"]["orders"]["France"] == [
+            "A Paris - Burgundy"
+        ]
+
+    def test_simulation_run_bad_key(self, tmp_path, gm_home, keys_dir):
+        """Wrong key on simulation_run produces decrypt_error."""
+        other = str(tmp_path / "other")
+        gpg.generate_key(other, "Other", "other@test.local")
+        ct = gpg.encrypt(other, '{"orders":{}}', "other@test.local")
+        event = {
+            "event": "simulation_run",
+            "power": "X",
+            "encrypted_data": ct,
+        }
+        result = decrypt_event(event, gm_home, keys_dir, {})
+        assert "decrypt_error" in result
+        assert "encrypted_data" in result
+
+
 class TestDecryptLog:
     def test_full_roundtrip(self, tmp_path, gm_home, keys_dir):
         plaintext1 = "Austria strategy"
@@ -193,6 +231,29 @@ class TestDecryptLog:
         assert e2["event"] == "message_routed"
         assert e2["plaintext"] == plaintext2
         assert "encrypted" not in e2
+
+    def test_simulation_run_decrypted(self, tmp_path, gm_home, keys_dir):
+        """simulation_run events are counted in decrypt_log."""
+        sim_data = json.dumps({"orders": {}, "summary": {}})
+        ct = gpg.encrypt(gm_home, sim_data, "gm@perfid.local")
+
+        log_path = str(tmp_path / "game.jsonl")
+        with open(log_path, "w") as f:
+            f.write(json.dumps({
+                "event": "simulation_run",
+                "power": "France",
+                "phase": "Spring",
+                "year": 1901,
+                "encrypted_data": ct,
+            }) + "\n")
+
+        output = io.StringIO()
+        count = decrypt_log(log_path, gm_home, keys_dir, output=output)
+        assert count == 1
+
+        event = json.loads(output.getvalue().strip())
+        assert "simulation" in event
+        assert "encrypted_data" not in event
 
     def test_handles_missing_gm_key(self, tmp_path):
         log_path = str(tmp_path / "game.jsonl")

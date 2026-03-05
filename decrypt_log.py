@@ -77,6 +77,16 @@ def decrypt_event(event, gm_gnupghome, keys_dir, key_cache):
             except Exception as e:
                 event["decrypt_error"] = str(e)
 
+    elif event_type == "simulation_run" and "encrypted_data" in event:
+        ciphertext = event["encrypted_data"]
+        if ciphertext.startswith("-----BEGIN PGP MESSAGE-----"):
+            try:
+                plaintext = gpg_mod.decrypt(gm_gnupghome, ciphertext)
+                event["simulation"] = json.loads(plaintext)
+                del event["encrypted_data"]
+            except Exception as e:
+                event["decrypt_error"] = str(e)
+
     elif event_type == "message_routed" and "encrypted" in event:
         ciphertext = event["encrypted"]
         if ciphertext.startswith("-----BEGIN PGP MESSAGE-----"):
@@ -133,6 +143,7 @@ def decrypt_log(log_path, gm_gnupghome, keys_dir, output=None):
                 had_encrypted = (
                     "encrypted_output" in event
                     or "encrypted" in event
+                    or "encrypted_data" in event
                 )
                 event = decrypt_event(
                     event, gm_gnupghome, keys_dir, key_cache,
@@ -140,6 +151,7 @@ def decrypt_log(log_path, gm_gnupghome, keys_dir, output=None):
                 still_encrypted = (
                     "encrypted_output" in event
                     or "encrypted" in event
+                    or "encrypted_data" in event
                 )
                 if had_encrypted and not still_encrypted:
                     decrypted_count += 1

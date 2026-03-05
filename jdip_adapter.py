@@ -14,7 +14,9 @@ Usage:
 """
 
 import json
+import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 # jDip directory relative to this file
@@ -282,6 +284,20 @@ def simulate(state, orders):
             "scs_after": new_scs,
         }
     result["summary"] = summary
+
+    # Log to sidecar file if PERFID_SIM_LOG is set
+    sim_log = os.environ.get("PERFID_SIM_LOG")
+    if sim_log:
+        record = json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "phase": phase_label,
+            "year": year,
+            "orders": orders,
+            "order_results": result.get("order_results", []),
+            "summary": summary,
+        }, separators=(",", ":"))
+        with open(sim_log, "a") as f:
+            f.write(record + "\n")
 
     return result
 

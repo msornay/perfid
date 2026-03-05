@@ -200,7 +200,7 @@ class TestNegotiationPrompt:
             "England", state, game_dir, round_num=1,
         )
         assert "cannot submit orders" in stp.lower()
-        assert "1/3" in stp or "1 of 3" in stp
+        assert "1/2" in stp or "1 of 2" in stp
 
     def test_round_2_negotiation_only(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
@@ -210,12 +210,13 @@ class TestNegotiationPrompt:
         assert "cannot submit orders" in stp.lower()
         assert "negotiation" in stp.lower()
 
-    def test_round_3_still_negotiation(self, state, game_dir):
+    def test_round_3_can_submit(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)
         stp = season_turn_prompt(
             "Germany", state, game_dir, round_num=3,
         )
-        assert "cannot submit orders" in stp.lower()
+        assert "submit" in stp.lower()
+        assert "cannot submit" not in stp.lower()
 
     def test_round_4_can_submit(self, state, game_dir):
         init_message_dirs(game_dir, POWERS)

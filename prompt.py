@@ -177,17 +177,10 @@ writing plaintext — diagnose and fix the gpg command instead.
    ```
 
 ## Submitting orders
-1. Write your orders as JSON:
-   ```json
-   {{"power": "{power}", "year": <year>, "phase": "<phase>", \
-"orders": ["order1", "order2", ...]}}
-   ```
-2. Encrypt with the GM's public key:
-   ```
-   gpg --armor --encrypt --trust-model always \\
-       --recipient gm@perfid.local \\
-       --output orders/<year>/<phase>/{power}.gpg
-   ```
+**Do NOT submit orders until the turn prompt explicitly says you may.** \
+Early rounds are negotiation-only. When order submission is allowed, the \
+turn prompt will provide the exact command and destination path. Never \
+write to the orders directory on your own.
 
 ## Private notes
 Encrypt notes with your own key to persist thoughts across turns. \
@@ -291,10 +284,10 @@ def system_prompt(power):
 
 
 NEGOTIATION_PROMPT = """\
-# {phase} {year} — Negotiation Round {round_num}/3
+# {phase} {year} — Negotiation Round {round_num}/{min_negotiation_rounds}
 
-**Year**: {year} | **Phase**: {phase} | **Round**: {round_num} of 3 \
-(negotiation only)
+**Year**: {year} | **Phase**: {phase} | **Round**: {round_num} of \
+{min_negotiation_rounds} (negotiation only)
 
 ## Current Board Position
 
@@ -315,8 +308,8 @@ NEGOTIATION_PROMPT = """\
 
 ## Instructions
 
-This is **negotiation round {round_num}/3**. You cannot submit orders \
-yet. Use this round to:
+This is **negotiation round {round_num}/{min_negotiation_rounds}**. \
+You cannot submit orders yet. Use this round to:
 
 1. **Read** any messages in your inbox by decrypting them:
    ```
@@ -422,12 +415,12 @@ ORDERS
 
 
 def season_turn_prompt(power, state, game_dir, round_num=1,
-                       dropbox=None):
+                       dropbox=None, min_negotiation_rounds=2):
     """Generate the season turn prompt.
 
-    In negotiation rounds (round_num <= 3), generates a
-    negotiation-only prompt. In later rounds, includes order
-    submission instructions pointing to the dropbox.
+    In negotiation rounds (round_num <= min_negotiation_rounds),
+    generates a negotiation-only prompt. In later rounds, includes
+    order submission instructions pointing to the dropbox.
 
     Args:
         power: Diplomacy power name.
@@ -435,7 +428,9 @@ def season_turn_prompt(power, state, game_dir, round_num=1,
         game_dir: Path to game directory.
         round_num: Current round number (1-indexed).
         dropbox: Path to the power's order dropbox directory.
-            Required when round_num > 3.
+            Required when round_num > min_negotiation_rounds.
+        min_negotiation_rounds: Negotiation rounds before orders
+            are allowed.
 
     Returns:
         Season turn prompt string.
@@ -452,6 +447,7 @@ def season_turn_prompt(power, state, game_dir, round_num=1,
         phase=phase,
         phase_label=phase_label,
         round_num=round_num,
+        min_negotiation_rounds=min_negotiation_rounds,
         all_units=_format_all_units(state),
         sc_ownership=_format_sc_ownership(state),
         your_units=_format_units(pview["your_units"]),
@@ -459,7 +455,7 @@ def season_turn_prompt(power, state, game_dir, round_num=1,
         inbox=_format_inbox(inbox),
     )
 
-    if round_num <= 3:
+    if round_num <= min_negotiation_rounds:
         return NEGOTIATION_PROMPT.format(**common)
 
     # Build example orders from the power's actual units
@@ -805,7 +801,7 @@ def _disband_instructions(power, units, diff):
 
 
 def turn_context(power, state, game_dir, round_num=None,
-                 dropbox=None):
+                 dropbox=None, min_negotiation_rounds=2):
     """Generate the appropriate per-turn prompt based on phase.
 
     Dispatches to the correct prompt generator based on the game
@@ -817,6 +813,8 @@ def turn_context(power, state, game_dir, round_num=None,
         game_dir: Path to game directory.
         round_num: For movement phases, the current round number.
         dropbox: For movement phases, the order dropbox path.
+        min_negotiation_rounds: Negotiation rounds before orders
+            are allowed.
 
     Returns:
         Turn-specific prompt string.
@@ -826,8 +824,9 @@ def turn_context(power, state, game_dir, round_num=None,
     if phase in (Phase.SPRING, Phase.FALL):
         return season_turn_prompt(
             power, state, game_dir,
-            round_num=round_num or 4,
+            round_num=round_num or (min_negotiation_rounds + 1),
             dropbox=dropbox,
+            min_negotiation_rounds=min_negotiation_rounds,
         )
 
     if phase in (Phase.SPRING_RETREAT, Phase.FALL_RETREAT):

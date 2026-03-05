@@ -19,6 +19,7 @@ KEY_GENERATED = "key_generated"
 KEY_IMPORTED = "key_imported"
 GAME_CREATED = "game_created"
 GAME_ENDED = "game_ended"
+SIMULATION_RUN = "simulation_run"
 ERROR = "error"
 
 
@@ -145,6 +146,23 @@ class GameLogger:
         if phase is not None:
             kwargs["phase"] = phase
         self._event(ERROR, **kwargs)
+
+    def simulation_run(self, power, phase, year, encrypted_data):
+        """Log a simulation run by an agent.
+
+        Args:
+            power: Diplomacy power name.
+            phase: Phase label (e.g. "Spring").
+            year: Game year (e.g. 1901).
+            encrypted_data: GM-encrypted simulation record.
+        """
+        self._event(
+            SIMULATION_RUN,
+            power=power,
+            phase=phase,
+            year=year,
+            encrypted_data=encrypted_data,
+        )
 
     def read_events(self, event_type=None):
         """Read all events from the log, optionally filtered by type.

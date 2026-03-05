@@ -15,6 +15,7 @@ from logger import (
     MESSAGE_SENT,
     ORDERS_SUBMITTED,
     PHASE_START,
+    SIMULATION_RUN,
     GameLogger,
 )
 
@@ -132,6 +133,20 @@ class TestEventTypes:
         log.error("GM", "Failed to start sandbox")
         e = log.read_events()[0]
         assert "phase" not in e
+
+    def test_simulation_run(self, log):
+        log.simulation_run(
+            "France", "Spring", 1901,
+            "-----BEGIN PGP MESSAGE-----\nencrypted",
+        )
+        e = log.read_events()[0]
+        assert e["event"] == SIMULATION_RUN
+        assert e["power"] == "France"
+        assert e["phase"] == "Spring"
+        assert e["year"] == 1901
+        assert e["encrypted_data"] == (
+            "-----BEGIN PGP MESSAGE-----\nencrypted"
+        )
 
 
 class TestReadEvents:
