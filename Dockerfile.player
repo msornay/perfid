@@ -2,7 +2,7 @@ FROM node:20-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       gnupg python3 default-jre-headless sudo \
+       gnupg python3 python3-pil default-jre-headless sudo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
@@ -13,6 +13,7 @@ RUN useradd -m player \
 
 # Copy perfid Python modules into the container
 COPY *.py /perfid/
+COPY map_renderer/ /perfid/map_renderer/
 COPY perfid /perfid/perfid
 RUN chmod +x /perfid/perfid
 

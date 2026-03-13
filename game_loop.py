@@ -11,11 +11,13 @@ user via subprocess.run(['sudo', '-u', 'player', ...]).
 import json
 import os
 import random
-import signal
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 
 import gpg as gpg_mod
 from game_state import (
@@ -33,7 +35,6 @@ from game_state import (
     next_phase,
     save_state,
 )
-from logger import GameLogger
 from message_router import (
     archive_phase,
     route_messages,
@@ -58,6 +59,14 @@ SIM_LOG_PATH = "/tmp/perfid-simulations.jsonl"
 PLAYER_HOME = "/home/player"
 PLAYER_CLAUDE = os.path.join(PLAYER_HOME, ".claude")
 CREDENTIALS_SRC = "/root/.claude-credentials"
+
+
+def emit(event, **kwargs):
+    """Write a structured JSONL event to stdout."""
+    record = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
+    record.update(kwargs)
+    sys.stdout.write(json.dumps(record, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
 
 
 class PerfidError(Exception):
@@ -93,11 +102,6 @@ def _remove_stale_gpg_sockets(gpg_dir):
                 os.remove(os.path.join(gpg_dir, entry))
             except OSError:
                 pass
-
-
-def _log(logger, event, **kwargs):
-    """Write a structured JSONL event to the game log."""
-    logger._event(event, **kwargs)
 
 
 def _active_powers(state):
@@ -146,6 +150,35 @@ def _clear_checkpoint(game_dir):
         pass
 
 
+# --- Recipient keyring cache for message decryption ---
+
+
+def _get_recipient_gnupghome(gm_gnupghome, keys_dir, recipient, cache):
+    """Get a temp GNUPGHOME with the recipient's private key.
+
+    Caches keyrings so we only decrypt each key once per session.
+    """
+    if recipient in cache:
+        return cache[recipient]
+
+    key_file = os.path.join(keys_dir, f"{recipient}.key.gpg")
+    if not os.path.exists(key_file):
+        cache[recipient] = None
+        return None
+
+    tmpdir = tempfile.mkdtemp(prefix=f"perfid-dec-{recipient.lower()}-")
+    try:
+        os.chmod(tmpdir, 0o700)
+        private_key = gpg_mod.decrypt_file(gm_gnupghome, key_file)
+        gpg_mod.import_key(tmpdir, private_key)
+        cache[recipient] = tmpdir
+        return tmpdir
+    except Exception:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        cache[recipient] = None
+        return None
+
+
 # --- GPG isolation ---
 
 
@@ -164,7 +197,6 @@ def setup_turn_gpg(ctx, power):
     """
     game_dir = ctx["game_dir"]
     gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
     lc_power = power.lower()
     gpg_dir = f"/tmp/gpg-{lc_power}"
 
@@ -255,7 +287,7 @@ def setup_turn_gpg(ctx, power):
             check=True, capture_output=True,
         )
 
-    _log(logger, "gpg_setup", power=power, action="keys_injected")
+    emit("gpg_setup", power=power, action="keys_injected")
 
 
 def cleanup_turn_gpg(ctx, power):
@@ -270,7 +302,6 @@ def cleanup_turn_gpg(ctx, power):
         power: Diplomacy power name.
     """
     game_dir = ctx["game_dir"]
-    logger = ctx["logger"]
     lc_power = power.lower()
     gpg_dir = f"/tmp/gpg-{lc_power}"
     key_email = f"{lc_power}@perfid.local"
@@ -318,15 +349,14 @@ def cleanup_turn_gpg(ctx, power):
     if os.path.islink(gnupg_link):
         os.remove(gnupg_link)
 
-    _log(logger, "gpg_cleanup", power=power,
-         memory_encrypted=memory_encrypted)
+    emit("gpg_cleanup", power=power, memory_encrypted=memory_encrypted)
 
 
 # --- Agent execution ---
 
 
 def _collect_simulation_log(ctx, power):
-    """Read simulation sidecar file, encrypt and log each record, delete file.
+    """Read simulation sidecar file, emit each record as plaintext, delete file.
 
     Args:
         ctx: Game context dict.
@@ -334,9 +364,6 @@ def _collect_simulation_log(ctx, power):
     """
     if not os.path.exists(SIM_LOG_PATH):
         return
-
-    gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
 
     try:
         with open(SIM_LOG_PATH) as f:
@@ -353,19 +380,13 @@ def _collect_simulation_log(ctx, power):
         except json.JSONDecodeError:
             continue
 
-        try:
-            encrypted = gpg_mod.encrypt(
-                gm_gnupghome, line, "gm@perfid.local"
-            )
-        except Exception:
-            encrypted = "(encryption failed)"
-
-        logger.simulation_run(
-            power=power,
-            phase=record.get("phase", ""),
-            year=record.get("year", 0),
-            encrypted_data=encrypted,
-        )
+        emit("simulation_run",
+             power=power,
+             phase=record.get("phase", ""),
+             year=record.get("year", 0),
+             orders=record.get("orders"),
+             order_results=record.get("order_results"),
+             summary=record.get("summary"))
 
     try:
         os.unlink(SIM_LOG_PATH)
@@ -376,8 +397,8 @@ def _collect_simulation_log(ctx, power):
 def run_agent(ctx, power, prompt, env_extra=None):
     """Run the Claude agent for a power's turn.
 
-    Calls claude as the player user via sudo. Captures stdout,
-    encrypts it with the GM key, and logs the encrypted output.
+    Calls claude as the player user via sudo. Captures stdout
+    and emits plaintext output as a JSONL event.
 
     Args:
         ctx: Game context dict.
@@ -390,8 +411,6 @@ def run_agent(ctx, power, prompt, env_extra=None):
         True if the agent exited successfully, False otherwise.
     """
     game_dir = ctx["game_dir"]
-    gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
     lc_power = power.lower()
     gpg_dir = f"/tmp/gpg-{lc_power}"
 
@@ -427,7 +446,7 @@ def run_agent(ctx, power, prompt, env_extra=None):
             "--dangerously-skip-permissions", "--verbose",
         ]
 
-    _log(logger, "agent_start", power=power, session=session_id)
+    emit("agent_start", power=power, session=session_id)
 
     outpath = f"/tmp/perfid-agent-{lc_power}.out"
     try:
@@ -454,25 +473,13 @@ def run_agent(ctx, power, prompt, env_extra=None):
     if not started:
         mark_session_started(game_dir, power)
 
-    # Encrypt agent output with GM key and log
-    try:
-        encrypted_output = gpg_mod.encrypt(
-            gm_gnupghome, output, "gm@perfid.local"
-        )
-    except Exception:
-        encrypted_output = "(encryption failed)"
-
-    _log(logger, "agent_turn", power=power,
-         encrypted_output=encrypted_output)
+    # Emit plaintext agent output
+    emit("agent_output", power=power, output=output)
 
     # Collect simulation sidecar log (if agent ran any simulations)
     _collect_simulation_log(ctx, power)
 
-    # Print output to stdout for live monitoring
-    if output:
-        print(output, end="", flush=True)
-
-    _log(logger, "agent_done", power=power,
+    emit("agent_done", power=power,
          submitted_orders=False)  # updated by caller
 
     if returncode != 0:
@@ -487,13 +494,17 @@ def run_agent(ctx, power, prompt, env_extra=None):
 def route_and_log_messages(ctx, power, state):
     """Route messages from a power's outbox and log them.
 
+    Decrypts message content using GM key + recipient's private key.
+
     Args:
         ctx: Game context dict.
         power: Diplomacy power name.
         state: Current game state dict.
     """
     game_dir = ctx["game_dir"]
-    logger = ctx["logger"]
+    gm_gnupghome = ctx["gm_gnupghome"]
+    key_cache = ctx.get("_key_cache", {})
+    keys_dir = os.path.join(game_dir, "keys")
 
     routed = route_messages(game_dir, power)
 
@@ -503,17 +514,33 @@ def route_and_log_messages(ctx, power, state):
         if not parsed:
             continue
 
-        # Read the encrypted message content for logging
-        try:
-            with open(str(src), "r") as f:
-                encrypted = f.read()
-        except Exception:
-            encrypted = ""
+        sender = parsed["sender"]
+        recipient = parsed["recipient"]
 
-        _log(logger, "message_routed",
-             sender=parsed["sender"],
-             recipient=parsed["recipient"],
-             encrypted=encrypted)
+        # Read and decrypt message content
+        plaintext = ""
+        try:
+            with open(str(dest), "r") as f:
+                encrypted = f.read()
+            if encrypted.startswith("-----BEGIN PGP MESSAGE-----"):
+                gnupghome = _get_recipient_gnupghome(
+                    gm_gnupghome, keys_dir, recipient, key_cache,
+                )
+                if gnupghome:
+                    plaintext = gpg_mod.decrypt(gnupghome, encrypted)
+                else:
+                    plaintext = "(decryption failed: no key)"
+            else:
+                plaintext = encrypted
+        except Exception:
+            plaintext = "(decryption failed)"
+
+        ctx["_key_cache"] = key_cache
+
+        emit("message_routed",
+             sender=sender,
+             recipient=recipient,
+             plaintext=plaintext)
 
 
 # --- Phase handlers ---
@@ -532,7 +559,6 @@ def _movement_phase(ctx, state):
         state: Current game state dict.
     """
     game_dir = ctx["game_dir"]
-    logger = ctx["logger"]
     year = state["year"]
     phase = state["phase"]
 
@@ -553,9 +579,7 @@ def _movement_phase(ctx, state):
 
     if cp:
         skipped = cp['power_order'][:cp['next_index']]
-        print(f"  Resuming round {cp['round']} — "
-              f"skipping {', '.join(skipped)} "
-              f"(already played)")
+        emit("resume", round=cp['round'], skipped=skipped)
 
     for round_num in range(start_round, MAX_ROUNDS + 1):
         can_submit = round_num > MIN_NEGOTIATION_ROUNDS
@@ -585,7 +609,8 @@ def _movement_phase(ctx, state):
             if i < start_index:
                 continue
 
-            print(f"\n  === {power.upper()} (round {round_num}) ===")
+            emit("turn_start", power=power, round=round_num,
+                 phase_type="movement")
 
             setup_turn_gpg(ctx, power)
 
@@ -611,9 +636,7 @@ def _movement_phase(ctx, state):
                         _dropbox_path(power),
                     )
                     if collected:
-                        print(f"    {power} submitted orders.")
-                        _log(logger, "orders_collected",
-                             power=power)
+                        emit("orders_collected", power=power)
             finally:
                 cleanup_turn_gpg(ctx, power)
 
@@ -629,12 +652,11 @@ def _movement_phase(ctx, state):
                 for p in active
             )
             if all_submitted:
-                print("  All powers have submitted orders.")
+                emit("all_orders_submitted")
                 break
     else:
         # max_rounds reached — log and continue
-        print(f"  Round limit reached ({MAX_ROUNDS}). "
-              f"Using default orders for non-submitters.")
+        emit("round_limit", max_rounds=MAX_ROUNDS)
 
     _clear_checkpoint(game_dir)
 
@@ -669,14 +691,14 @@ def _retreat_phase(ctx, state):
     if cp:
         skipped = powers_to_act[:cp['next_index']]
         if skipped:
-            print(f"  Resuming — skipping {', '.join(skipped)} "
-                  f"(already played)")
+            emit("resume", round=1, skipped=skipped)
 
     for i, power in enumerate(powers_to_act):
         if i < start_index:
             continue
 
-        print(f"\n  === {power.upper()} — retreat ===")
+        emit("turn_start", power=power, round=1,
+             phase_type="retreat")
 
         dropbox = _dropbox_path(power)
         os.makedirs(dropbox, mode=0o700, exist_ok=True)
@@ -733,14 +755,14 @@ def _winter_phase(ctx, state):
     if cp:
         skipped = active[:cp['next_index']]
         if skipped:
-            print(f"  Resuming — skipping {', '.join(skipped)} "
-                  f"(already played)")
+            emit("resume", round=1, skipped=skipped)
 
     for i, power in enumerate(active):
         if i < start_index:
             continue
 
-        print(f"\n  === {power.upper()} — adjustments ===")
+        emit("turn_start", power=power, round=1,
+             phase_type="adjustment")
 
         dropbox = _dropbox_path(power)
         os.makedirs(dropbox, mode=0o700, exist_ok=True)
@@ -787,11 +809,10 @@ def adjudicate_movement(ctx, state):
     """
     game_dir = ctx["game_dir"]
     gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
     year = state["year"]
     phase = state["phase"]
 
-    print("  Adjudicating via jDip...")
+    emit("adjudication_start")
 
     # Reload state (agents may have changed it — though they shouldn't)
     state = load_state(game_dir)
@@ -806,76 +827,52 @@ def adjudicate_movement(ctx, state):
     all_orders = collected["orders"]
 
     if collected["defaults"]:
-        print(f"  Default orders for: "
-              f"{', '.join(collected['defaults'])}")
+        emit("default_orders", powers=collected["defaults"])
     if collected["errors"]:
         for power, errs in collected["errors"].items():
             for order, msg in errs:
+                emit("order_error", power=power, order=order,
+                     message=msg)
                 print(f"  {power} order error: {order} — {msg}",
                       file=sys.stderr)
 
-    # Print submitted orders
+    # Emit submitted orders
     for power in sorted(all_orders):
         orders = all_orders[power]
-        print(f"  {power} orders:")
-        for o in orders:
-            print(f"    {o}")
-
-    # Log submitted orders
-    for power, orders in all_orders.items():
-        logger.orders_submitted(power, orders, phase)
+        emit("orders_submitted", power=power, orders=orders)
 
     # Adjudicate (jDip is in the container)
     state = adjudicate(state, all_orders, game_dir)
 
     order_results = state.pop("order_results", [])
-    logger.adjudication_result(phase, order_results)
 
-    # Print per-order results
+    # Emit per-order results
     if order_results:
-        print("  Order results:")
-        for r in order_results:
-            status = r.get("result", "unknown")
-            msg = r.get("message", "")
-            detail = f" ({msg})" if msg else ""
-            print(f"    {r.get('order', '?')}: {status}{detail}")
+        emit("order_results", results=order_results)
 
-    # Print dislodged units
+    # Emit dislodged units
     dislodged = state.get("dislodged", [])
     if dislodged:
-        print("  Dislodged units:")
-        for d in dislodged:
-            retreats = ", ".join(d.get("retreats", []))
-            print(f"    {d['power']} {d['unit']['type']} "
-                  f"{d['unit']['location']}"
-                  f" (can retreat to: {retreats or 'none — must disband'})")
+        emit("dislodged", units=dislodged)
 
-    # Print SC ownership changes
+    # Emit SC ownership changes
     sc_after = state.get("sc_ownership", {})
-    sc_changes = []
+    sc_changes = {}
     for sc in sorted(set(list(sc_before) + list(sc_after))):
         old = sc_before.get(sc)
         new = sc_after.get(sc)
         if old != new:
-            if old:
-                sc_changes.append(f"    {sc}: {old} -> {new}")
-            else:
-                sc_changes.append(f"    {sc}: neutral -> {new}")
+            sc_changes[sc] = {"from": old, "to": new}
     if sc_changes:
-        print("  SC ownership changes:")
-        for c in sc_changes:
-            print(c)
+        emit("sc_changes", changes=sc_changes)
 
-    _log(logger, "adjudication", year=year, phase=phase,
+    emit("adjudication", year=year, phase=phase,
          order_results=order_results,
          dislodged=dislodged,
          resolved_units=state["units"],
-         sc_changes={sc: {"from": sc_before.get(sc),
-                          "to": sc_after.get(sc)}
-                     for sc in set(list(sc_before) + list(sc_after))
-                     if sc_before.get(sc) != sc_after.get(sc)})
+         sc_changes=sc_changes)
 
-    print(f"  Phase advanced to: {state['year']} {state['phase']}")
+    emit("phase_advanced", year=state["year"], phase=state["phase"])
 
 
 def apply_retreats_and_advance(ctx, state):
@@ -887,7 +884,6 @@ def apply_retreats_and_advance(ctx, state):
     """
     game_dir = ctx["game_dir"]
     gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
 
     # Reload state
     state = load_state(game_dir)
@@ -923,25 +919,16 @@ def apply_retreats_and_advance(ctx, state):
                 "action": "disband",
             })
 
-    # Print retreat actions
     if retreat_orders:
-        print("  Retreat results:")
-        for r in retreat_orders:
-            unit = r["unit"]
-            if r["action"] == "retreat":
-                print(f"    {r['power']} {unit['type']} "
-                      f"{unit['location']} -> {r['destination']}")
-            else:
-                print(f"    {r['power']} {unit['type']} "
-                      f"{unit['location']} disbanded")
+        emit("retreat_results", retreat_orders=retreat_orders)
 
     state = apply_retreats(state, retreat_orders, game_dir)
-    _log(logger, "retreats_applied", year=year, phase=phase,
+    emit("retreats_applied", year=year, phase=phase,
          retreat_orders=retreat_orders,
          units=state["units"])
     state = next_phase(state)
     save_state(state, game_dir)
-    print(f"  Phase advanced to: {state['year']} {state['phase']}")
+    emit("phase_advanced", year=state["year"], phase=state["phase"])
 
 
 def apply_adjustments_and_advance(ctx, state):
@@ -953,7 +940,6 @@ def apply_adjustments_and_advance(ctx, state):
     """
     game_dir = ctx["game_dir"]
     gm_gnupghome = ctx["gm_gnupghome"]
-    logger = ctx["logger"]
 
     # Reload state
     state = load_state(game_dir)
@@ -999,33 +985,21 @@ def apply_adjustments_and_advance(ctx, state):
         if actions:
             adjustments[power] = actions
 
-    # Print adjustment summary
     if adj_counts:
-        print("  Adjustment counts:")
-        for power in sorted(adj_counts):
-            count = adj_counts[power]
-            if count > 0:
-                print(f"    {power}: +{count} build(s)")
-            elif count < 0:
-                print(f"    {power}: {count} disband(s)")
+        emit("adjustment_counts", counts=adj_counts)
     if adjustments:
-        print("  Adjustments applied:")
-        for power in sorted(adjustments):
-            for a in adjustments[power]:
-                unit = a["unit"]
-                print(f"    {power} {a['action']} "
-                      f"{unit['type']} {unit['location']}")
+        emit("adjustments_applied", adjustments=adjustments)
 
     state = apply_adjustments(state, adjustments, game_dir)
-    _log(logger, "adjustments_applied", year=year, phase=phase,
+    emit("adjustments_applied", year=year, phase=phase,
          adjustment_counts=adj_counts,
          adjustments=adjustments,
          units=state["units"])
     state = next_phase(state)
     save_state(state, game_dir)
 
-    print(format_status(state))
-    print(f"  Next year: {state['year']} {state['phase']}")
+    emit("status", status=format_status(state))
+    emit("phase_advanced", year=state["year"], phase=state["phase"])
 
 
 # --- Main entry point ---
@@ -1054,17 +1028,18 @@ def run(game_id, games_dir, script_dir):
                 f"Run 'perfid new {game_id}' first."
             )
 
-    logger = GameLogger(game_dir)
+    # Wire jDip event callback
+    import jdip_adapter
+    jdip_adapter.set_event_callback(emit)
 
     ctx = {
         "game_id": game_id,
         "game_dir": game_dir,
         "gm_gnupghome": gm_gnupghome,
         "script_dir": script_dir,
-        "logger": logger,
     }
 
-    print(f"Starting game loop for '{game_id}'...")
+    emit("game_start", game_id=game_id)
 
     while True:
         # Route any undelivered messages from a previous interrupted run
@@ -1075,30 +1050,14 @@ def run(game_id, games_dir, script_dir):
 
         # Check for winner
         if state["winner"]:
-            print()
-            print("==========================================")
-            print(f"  GAME OVER — {state['winner']} wins!")
-            print("==========================================")
-            print(format_status(state))
-            logger.game_ended(
-                winner=state["winner"], reason="solo victory"
-            )
+            emit("game_over", winner=state["winner"],
+                 status=format_status(state))
             break
 
         phase = Phase(state["phase"])
         year = state["year"]
 
-        print()
-        print(f"--- {year} {phase.value} ---")
-
-        # Log phase start
-        season = phase.value.split()[0]
-        phase_type = (
-            " ".join(phase.value.split()[1:])
-            if " " in phase.value
-            else "Turn"
-        )
-        logger.phase_start(year, season, phase_type)
+        emit("phase_start", year=year, phase=phase.value)
 
         if phase in (Phase.SPRING, Phase.FALL):
             _movement_phase(ctx, state)

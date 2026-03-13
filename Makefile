@@ -1,4 +1,4 @@
-.PHONY: test test-local test-full-game lint lint-local build login new play status destroy
+.PHONY: test test-local test-full-game lint lint-local build login new play status destroy render
 
 PLAYER_IMAGE ?= perfid-player
 
@@ -9,9 +9,9 @@ test:
 	docker run --rm perfid-test
 
 test-local:
-	python3 -m pytest -v test_gpg.py test_logger.py test_game_state.py \
+	python3 -m pytest -v test_gpg.py test_game_state.py \
 		test_message_router.py test_orders.py test_prompt.py \
-		test_jdip_adapter.py test_game_loop.py test_decrypt_log.py
+		test_jdip_adapter.py test_game_loop.py
 	python3 -m pytest -v test_perfid.py
 
 test-full-game:
@@ -61,14 +61,18 @@ new:
 		$(PLAYER_IMAGE) new $(GAME)
 
 # Run the game loop (runs inside container)
+# stdout is JSONL — tee to perfid-games/<game-id>/game.jsonl for persistence
 play:
 	@test -n "$(GAME)" || { echo "Usage: make play GAME=<game-id>"; exit 1; }
+	@mkdir -p perfid-games/$(GAME)
 	docker run --rm --init \
 		-v "$$(cd perfid-games && pwd):/games" \
 		-v "perfid-sessions-$(GAME):/home/player/.claude" \
 		-e PERFID_GAMES_DIR=/games \
 		-e PYTHONUNBUFFERED=1 \
-		$(PLAYER_IMAGE) play $(GAME)
+		$(PLAYER_IMAGE) play $(GAME) \
+		2>perfid-games/$(GAME)/err.log \
+		| tee -a perfid-games/$(GAME)/game.jsonl
 
 # Print game status (runs inside container)
 status:
@@ -93,3 +97,14 @@ destroy:
 		fi; \
 	fi
 	@echo "Game '$(GAME)' destroyed."
+
+# --- Map rendering ---
+
+render:
+	@test -n "$(GAME_LOG)" || { echo "Usage: make render GAME_LOG=path/to/game.jsonl [OUTPUT_DIR=renders/]"; exit 1; }
+	docker build -f Dockerfile.test -t perfid-test .
+	docker run --rm \
+		-v "$$(cd $$(dirname $(GAME_LOG)) && pwd):/input:ro" \
+		-v "$$(mkdir -p $(or $(OUTPUT_DIR),renders) && cd $(or $(OUTPUT_DIR),renders) && pwd):/output" \
+		perfid-test \
+		python3 render_game.py /input/$$(basename $(GAME_LOG)) --output-dir /output

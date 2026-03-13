@@ -13,8 +13,6 @@ prompt.py               # System prompts + per-turn context for each agent
 orders.py               # Order parsing, submission (dropbox-based), collection
 jdip_adapter.py         # DATC-compliant adjudication via jDip (Java)
 gpg.py                  # GPG helpers: key generation, encrypt/decrypt, player key management
-logger.py               # Structured JSONL logging with timestamps
-decrypt_log.py          # Post-game log decryption helper (decrypts encrypted fields)
 Makefile                # Container build/run targets, test targets
 Dockerfile.player       # Container image: node + python + java + GPG + claude
 ```
@@ -58,12 +56,12 @@ Each game year has up to 5 phases:
 
 Each power gets a persistent Claude session. The first call uses `--session-id`, subsequent calls use `--resume` to maintain conversation context across turns.
 
-## Encrypted game log
+## Game log
 
-All agent output is encrypted with the GM key and logged as JSONL. Use `decrypt_log.py` for post-game analysis:
+All game events (agent output, messages, adjudication, jDip calls) are emitted as plaintext JSONL to stdout. Pipe to a file for persistence:
 
 ```bash
-python3 decrypt_log.py --gm-key gm-gpg/ game.jsonl > decrypted.jsonl
+perfid play GAME 2>err.log | tee game.jsonl
 ```
 
 ## Game flow

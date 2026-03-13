@@ -4,10 +4,11 @@ Mocks subprocess.run (for agent/GPG calls) and filesystem operations
 that require container context (chown, player user, etc.).
 """
 
+import contextlib
+import io
 import json
 import os
-import shutil
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,7 +29,7 @@ import game_loop
 def game_dir(tmp_path):
     """Create a game directory with initial state and GPG keys."""
     gd = str(tmp_path / "test-game")
-    state = new_game("test-001", gd, use_jdip=False)
+    new_game("test-001", gd, use_jdip=False)
     init_message_dirs(gd, POWERS)
 
     # Create GM keys
@@ -54,13 +55,11 @@ def game_dir(tmp_path):
 @pytest.fixture
 def ctx(game_dir):
     """Create a game context dict."""
-    from logger import GameLogger
     return {
         "game_id": "test-001",
         "game_dir": game_dir,
         "gm_gnupghome": os.path.join(game_dir, "gm-gpg"),
         "script_dir": os.path.dirname(os.path.abspath(__file__)),
-        "logger": GameLogger(game_dir),
     }
 
 
@@ -71,6 +70,23 @@ def state(game_dir):
 
 
 # --- Helper ---
+
+
+def capture_events(func, *args, **kwargs):
+    """Run func while capturing stdout, return parsed JSONL events."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        func(*args, **kwargs)
+    events = []
+    for line in buf.getvalue().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return events
 
 
 def mock_subprocess_run(*args, **kwargs):
@@ -174,7 +190,7 @@ class TestSetupTurnGpg:
         assert os.path.isdir(gpg_dir) or True  # dir may not exist in test
 
     @patch("game_loop.subprocess.run")
-    def test_logs_gpg_setup(self, mock_run, ctx, game_dir):
+    def test_emits_gpg_setup(self, mock_run, ctx, game_dir):
         mock_run.return_value = MagicMock(
             returncode=0, stdout=b"", stderr=b""
         )
@@ -183,36 +199,31 @@ class TestSetupTurnGpg:
              patch("os.path.islink", return_value=False), \
              patch("shutil.rmtree"):
             try:
-                game_loop.setup_turn_gpg(ctx, "France")
+                events = capture_events(
+                    game_loop.setup_turn_gpg, ctx, "France"
+                )
             except Exception:
-                pass
-        # Check that a gpg_setup event was logged
-        log_path = os.path.join(game_dir, "log.jsonl")
-        if os.path.exists(log_path):
-            with open(log_path) as f:
-                events = [json.loads(l) for l in f if l.strip()]
-            gpg_events = [
-                e for e in events if e.get("event") == "gpg_setup"
-            ]
-            # May or may not have logged depending on error
-            if gpg_events:
-                assert gpg_events[0]["power"] == "France"
+                events = []
+        gpg_events = [
+            e for e in events if e.get("event") == "gpg_setup"
+        ]
+        if gpg_events:
+            assert gpg_events[0]["power"] == "France"
 
 
 class TestCleanupTurnGpg:
     @patch("game_loop.subprocess.run")
-    def test_logs_gpg_cleanup(self, mock_run, ctx, game_dir):
+    def test_emits_gpg_cleanup(self, mock_run, ctx, game_dir):
         mock_run.return_value = MagicMock(
             returncode=0, stdout=b"", stderr=b""
         )
         gpg_dir = "/tmp/gpg-england"
         os.makedirs(gpg_dir, mode=0o700, exist_ok=True)
         with patch("shutil.rmtree"):
-            game_loop.cleanup_turn_gpg(ctx, "England")
+            events = capture_events(
+                game_loop.cleanup_turn_gpg, ctx, "England"
+            )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         cleanup_events = [
             e for e in events if e.get("event") == "gpg_cleanup"
         ]
@@ -226,24 +237,21 @@ class TestCleanupTurnGpg:
 class TestRunAgent:
     """Tests for run_agent.
 
-    We mock subprocess.Popen (used by run_agent for the claude call)
-    and gpg_mod.encrypt (to avoid real GPG calls in encryption).
+    We mock subprocess.Popen (used by run_agent for the claude call).
     """
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_first_call_uses_session_id(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("agent output")
         game_loop.run_agent(ctx, "England", "test prompt")
         cmd = mock_popen.call_args.args[0]
         assert "--session-id" in cmd
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_subsequent_call_uses_resume(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         from game_state import mark_session_started, get_session_id
         get_session_id(game_dir, "England")
@@ -255,29 +263,25 @@ class TestRunAgent:
         assert "--resume" in cmd
 
     @patch("game_loop.subprocess.Popen")
-    def test_agent_output_encrypted_and_logged(
+    def test_agent_output_emitted_plaintext(
         self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("secret strategy")
-        game_loop.run_agent(ctx, "France", "prompt")
+        events = capture_events(
+            game_loop.run_agent, ctx, "France", "prompt"
+        )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         agent_events = [
-            e for e in events if e.get("event") == "agent_turn"
+            e for e in events if e.get("event") == "agent_output"
         ]
         assert len(agent_events) >= 1
         evt = agent_events[0]
         assert evt["power"] == "France"
-        # Output should be encrypted (PGP message)
-        enc = evt.get("encrypted_output", "")
-        assert "BEGIN PGP MESSAGE" in enc or enc == "(encryption failed)"
+        assert evt["output"] == "secret strategy"
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_agent_called_with_sudo(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "Germany", "prompt")
@@ -286,10 +290,9 @@ class TestRunAgent:
         assert "-u" in cmd
         assert "player" in cmd
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_agent_gnupghome_set(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "Italy", "prompt")
@@ -298,10 +301,9 @@ class TestRunAgent:
         assert len(gnupghome_arg) == 1
         assert "gpg-italy" in gnupghome_arg[0]
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_agent_game_dir_env(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(ctx, "England", "prompt")
@@ -310,10 +312,9 @@ class TestRunAgent:
         assert len(game_dir_arg) == 1
         assert game_dir in game_dir_arg[0]
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_agent_env_extra_passed(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         mock_popen.side_effect = mock_popen_factory("output")
         game_loop.run_agent(
@@ -325,10 +326,9 @@ class TestRunAgent:
         assert len(dropbox_arg) == 1
         assert "/tmp/orders-france" in dropbox_arg[0]
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
     def test_agent_sim_log_env_passed(
-        self, mock_popen, mock_enc, ctx, game_dir
+        self, mock_popen, ctx, game_dir
     ):
         """PERFID_SIM_LOG env var is passed to the agent."""
         mock_popen.side_effect = mock_popen_factory("output")
@@ -338,13 +338,11 @@ class TestRunAgent:
         assert len(sim_arg) == 1
         assert game_loop.SIM_LOG_PATH in sim_arg[0]
 
-    @patch("game_loop.gpg_mod.encrypt", return_value="(mock encrypted)")
     @patch("game_loop.subprocess.Popen")
-    def test_sidecar_records_collected_into_log(
-        self, mock_popen, mock_enc, ctx, game_dir
+    def test_sidecar_records_emitted_plaintext(
+        self, mock_popen, ctx, game_dir
     ):
-        """Simulation sidecar records are encrypted and logged."""
-        # Write a sidecar file before running agent
+        """Simulation sidecar records are emitted as plaintext."""
         sidecar = game_loop.SIM_LOG_PATH
         record = json.dumps({
             "ts": "2026-01-01T00:00:00+00:00",
@@ -368,15 +366,14 @@ class TestRunAgent:
             return proc
 
         mock_popen.side_effect = popen_writes_sidecar
-        game_loop.run_agent(ctx, "France", "prompt")
+        events = capture_events(
+            game_loop.run_agent, ctx, "France", "prompt"
+        )
 
         # Sidecar should be deleted after collection
         assert not os.path.exists(sidecar)
 
-        # Check that simulation_run event was logged
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
+        # Check that simulation_run event was emitted
         sim_events = [
             e for e in events
             if e.get("event") == "simulation_run"
@@ -385,7 +382,8 @@ class TestRunAgent:
         assert sim_events[0]["power"] == "France"
         assert sim_events[0]["phase"] == "Spring"
         assert sim_events[0]["year"] == 1901
-        assert "encrypted_data" in sim_events[0]
+        # Plaintext — should have orders, not encrypted_data
+        assert "orders" in sim_events[0]
 
 
 # --- Tests: Route and log messages ---
@@ -398,11 +396,10 @@ class TestRouteAndLogMessages:
             game_dir, "France", "England", "Spring", 1,
             "encrypted content"
         )
-        game_loop.route_and_log_messages(ctx, "France", state)
+        events = capture_events(
+            game_loop.route_and_log_messages, ctx, "France", state
+        )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         msg_events = [
             e for e in events
             if e.get("event") == "message_routed"
@@ -426,7 +423,6 @@ class TestMovementPhase:
     ):
         mock_agent.return_value = True
         # Submit orders for all powers to end the phase
-        gm_gpg = os.path.join(game_dir, "gm-gpg")
         # Create a keyring that can encrypt to GM
         enc_home = str(os.path.join(game_dir, "enc-home"))
         gpg.init_gnupghome(enc_home)
@@ -701,7 +697,7 @@ class TestRetreatPhase:
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
-    def test_logs_retreat_orders(
+    def test_emits_retreat_events(
         self, mock_cleanup, mock_setup, mock_agent,
         ctx, game_dir
     ):
@@ -717,11 +713,10 @@ class TestRetreatPhase:
         save_state(state, game_dir)
 
         mock_agent.return_value = True
-        game_loop._retreat_phase(ctx, state)
+        events = capture_events(
+            game_loop._retreat_phase, ctx, state
+        )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         retreat_events = [
             e for e in events if e.get("event") == "retreats_applied"
         ]
@@ -787,7 +782,7 @@ class TestWinterPhase:
     @patch("game_loop.run_agent")
     @patch("game_loop.setup_turn_gpg")
     @patch("game_loop.cleanup_turn_gpg")
-    def test_logs_adjustments(
+    def test_emits_adjustments(
         self, mock_cleanup, mock_setup, mock_agent,
         ctx, game_dir
     ):
@@ -796,11 +791,10 @@ class TestWinterPhase:
         save_state(state, game_dir)
 
         mock_agent.return_value = True
-        game_loop._winter_phase(ctx, state)
+        events = capture_events(
+            game_loop._winter_phase, ctx, state
+        )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         adj_events = [
             e for e in events
             if e.get("event") == "adjustments_applied"
@@ -860,7 +854,7 @@ class TestAdjudicateMovement:
         assert mock_adj.called
 
     @patch("game_loop.adjudicate")
-    def test_logs_resolved_units(
+    def test_emits_adjudication(
         self, mock_adj, ctx, state, game_dir
     ):
         mock_adj.return_value = {
@@ -874,11 +868,10 @@ class TestAdjudicateMovement:
             "created_at": "2026-01-01",
             "updated_at": "2026-01-01",
         }
-        game_loop.adjudicate_movement(ctx, state)
+        events = capture_events(
+            game_loop.adjudicate_movement, ctx, state
+        )
 
-        log_path = os.path.join(game_dir, "log.jsonl")
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
         adj_events = [
             e for e in events if e.get("event") == "adjudication"
         ]

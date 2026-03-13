@@ -108,7 +108,7 @@ run_with_timeout 60 docker exec \
     -e PERFID_GAMES_DIR=/games \
     -e PERFID_MIN_ROUNDS=1 \
     "$ctr_name" python3 /perfid/perfid play "$game_id" \
-    >"$TEST_WS/play.log" 2>&1
+    >"$TEST_WS/play.log" 2>"$TEST_WS/play.err"
 play_rc=$?
 
 # Mock claude exits 42 at 1902 → perfid exits 1 (PerfidError)
@@ -296,60 +296,58 @@ else
 fi
 
 echo ""
-echo "--- Log assertions ---"
+echo "--- JSONL output assertions ---"
 
-if [[ -f "$gd/log.jsonl" ]]; then ok "game log exists"
-else ko "game log not found"; fi
-
-if [[ -f "$gd/log.jsonl" ]]; then
-    # agent_turn events with encrypted output
-    agent_turn_count=$(python3 -c "
+# stdout is now JSONL — all assertions read from play.log
+if [[ -f "$TEST_WS/play.log" ]]; then
+    # agent_output events with plaintext output
+    agent_output_count=$(python3 -c "
 import json
 count = 0
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
-            if e['event'] == 'agent_turn':
+            if e['event'] == 'agent_output':
                 count += 1
         except (json.JSONDecodeError, KeyError):
             pass
 print(count)
 ")
-    if [[ "$agent_turn_count" -ge 22 ]]; then
-        ok "log has $agent_turn_count agent_turn events (>=22)"
+    if [[ "$agent_output_count" -ge 22 ]]; then
+        ok "JSONL has $agent_output_count agent_output events (>=22)"
     else
-        ko "log has $agent_turn_count agent_turn events (expected >=22)"
+        ko "JSONL has $agent_output_count agent_output events (expected >=22)"
     fi
 
-    # agent_turn events have encrypted_output (PGP message)
-    has_encrypted=$(python3 -c "
+    # agent_output events have plaintext output (not encrypted)
+    has_plaintext=$(python3 -c "
 import json
 found = False
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
-            if e['event'] == 'agent_turn':
-                enc = e.get('encrypted_output', '')
-                if 'BEGIN PGP MESSAGE' in enc:
+            if e['event'] == 'agent_output':
+                out = e.get('output', '')
+                if 'Strategy:' in out:
                     found = True
                     break
         except (json.JSONDecodeError, KeyError):
             pass
 print(found)
 ")
-    if [[ "$has_encrypted" == "True" ]]; then
-        ok "agent_turn events contain encrypted output"
+    if [[ "$has_plaintext" == "True" ]]; then
+        ok "agent_output events contain plaintext Strategy: reasoning"
     else
-        ko "agent_turn events missing encrypted output"
+        ko "agent_output events missing plaintext Strategy: reasoning"
     fi
 
-    # message_routed events
+    # message_routed events with plaintext
     msg_count=$(python3 -c "
 import json
 count = 0
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             if json.loads(line)['event'] == 'message_routed':
@@ -359,16 +357,16 @@ with open('$gd/log.jsonl') as f:
 print(count)
 ")
     if [[ "$msg_count" -ge 4 ]]; then
-        ok "log has $msg_count message_routed events (>=4)"
+        ok "JSONL has $msg_count message_routed events (>=4)"
     else
-        ko "log has $msg_count message_routed events (expected >=4)"
+        ko "JSONL has $msg_count message_routed events (expected >=4)"
     fi
 
     # adjudication events
     adj_count=$(python3 -c "
 import json
 count = 0
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
@@ -379,118 +377,83 @@ with open('$gd/log.jsonl') as f:
 print(count)
 ")
     if [[ "$adj_count" -ge 2 ]]; then
-        ok "log has $adj_count adjudication events (>=2)"
+        ok "JSONL has $adj_count adjudication events (>=2)"
     else
-        ko "log has $adj_count adjudication events (expected >=2)"
+        ko "JSONL has $adj_count adjudication events (expected >=2)"
     fi
 
-    # decrypt_log.py can decrypt the log
-    python3 "$SCRIPT_DIR/decrypt_log.py" \
-        --gm-key "$gd/gm-gpg" "$gd/log.jsonl" \
-        >"$TEST_WS/dec.jsonl" 2>"$TEST_WS/dec.err" || true
-    dec_count=$(cat "$TEST_WS/dec.err" | grep -o '[0-9]*' | head -1)
-    if [[ -n "$dec_count" ]] && [[ "$dec_count" -gt 0 ]]; then
-        ok "decrypt_log.py decrypted $dec_count events"
+    # No log.jsonl on disk (we no longer write one)
+    if [[ ! -f "$gd/log.jsonl" ]]; then
+        ok "no log.jsonl on disk (stdout-only logging)"
     else
-        ko "decrypt_log.py failed to decrypt events"
+        ko "log.jsonl still exists on disk"
     fi
 
-    # Decrypted output contains Strategy: reasoning
-    has_strategy=$(python3 -c "
+    # JSONL events have timestamps
+    has_ts=$(python3 -c "
 import json
 found = False
-with open('$TEST_WS/dec.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
-            if e.get('event') == 'agent_turn' and 'Strategy:' in e.get('output', ''):
+            if 'ts' in e:
                 found = True
                 break
         except (json.JSONDecodeError, KeyError):
             pass
 print(found)
-" || echo "False")
-    if [[ "$has_strategy" == "True" ]]; then
-        ok "decrypted agent_turn output contains Strategy: reasoning"
+")
+    if [[ "$has_ts" == "True" ]]; then
+        ok "JSONL events have timestamps"
     else
-        ko "decrypted agent_turn output missing Strategy: reasoning"
+        ko "JSONL events missing timestamps"
     fi
 
-    # No plaintext agent reasoning in unencrypted log
-    has_plaintext=$(python3 -c "
+    # game_start event
+    has_game_start=$(python3 -c "
 import json
 found = False
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
-            e = json.loads(line)
-            if e.get('event') == 'agent_turn':
-                # Should NOT have plaintext 'output', only 'encrypted_output'
-                if 'output' in e and 'Strategy:' in e.get('output', ''):
-                    found = True
-                    break
+            if json.loads(line).get('event') == 'game_start':
+                found = True
+                break
         except (json.JSONDecodeError, KeyError):
             pass
 print(found)
 ")
-    if [[ "$has_plaintext" == "False" ]]; then
-        ok "no plaintext agent reasoning in unencrypted log"
+    if [[ "$has_game_start" == "True" ]]; then
+        ok "JSONL has game_start event"
     else
-        ko "plaintext agent reasoning found in unencrypted log!"
-    fi
-fi
-
-echo ""
-echo "--- Verbose output assertions ---"
-
-if [[ -f "$TEST_WS/play.log" ]]; then
-    # Uppercase turn headers from game_loop
-    if grep -q '=== [A-Z].* (round [0-9])' "$TEST_WS/play.log"; then
-        ok "play.log has uppercase turn headers"
-    else
-        ko "play.log missing uppercase turn headers"
+        ko "JSONL missing game_start event"
     fi
 
-    # Per-order adjudication results (jDip returns lowercase statuses)
-    if grep -q 'Order results:' "$TEST_WS/play.log"; then
-        ok "play.log has per-order adjudication results"
+    # phase_start events
+    phase_count=$(python3 -c "
+import json
+count = 0
+with open('$TEST_WS/play.log') as f:
+    for line in f:
+        try:
+            if json.loads(line).get('event') == 'phase_start':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$phase_count" -ge 4 ]]; then
+        ok "JSONL has $phase_count phase_start events (>=4)"
     else
-        ko "play.log missing per-order adjudication results"
+        ko "JSONL has $phase_count phase_start events (expected >=4)"
     fi
 
-    # Dislodged units reported
-    if grep -q 'Dislodged:' "$TEST_WS/play.log"; then
-        ok "play.log reports dislodged units"
-    else
-        ko "play.log missing dislodged unit reports"
-    fi
-
-    # SC ownership changes reported
-    if grep -q 'SC ownership changes:' "$TEST_WS/play.log"; then
-        ok "play.log reports SC ownership changes"
-    else
-        ko "play.log missing SC ownership changes"
-    fi
-
-    # Adjustment counts reported
-    if grep -qE '\+[0-9]+ build' "$TEST_WS/play.log"; then
-        ok "play.log reports adjustment counts"
-    else
-        ko "play.log missing adjustment counts"
-    fi
-else
-    ko "play.log not found"
-fi
-
-echo ""
-echo "--- JSONL feature assertions ---"
-
-if [[ -f "$gd/log.jsonl" ]]; then
     # adjudication events have sc_changes field
     has_sc_changes=$(python3 -c "
 import json
 found = False
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
@@ -511,7 +474,7 @@ print(found)
     has_adj_counts=$(python3 -c "
 import json
 found = False
-with open('$gd/log.jsonl') as f:
+with open('$TEST_WS/play.log') as f:
     for line in f:
         try:
             e = json.loads(line)
@@ -527,6 +490,81 @@ print(found)
     else
         ko "adjustments_applied events missing adjustment_counts field"
     fi
+
+    # simulation_run events from agent jDip simulations
+    sim_count=$(python3 -c "
+import json
+count = 0
+with open('$TEST_WS/play.log') as f:
+    for line in f:
+        try:
+            e = json.loads(line)
+            if e['event'] == 'simulation_run':
+                count += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+print(count)
+")
+    if [[ "$sim_count" -ge 2 ]]; then
+        ok "JSONL has $sim_count simulation_run events (>=2)"
+    else
+        ko "JSONL has $sim_count simulation_run events (expected >=2)"
+    fi
+else
+    ko "play.log not found"
+fi
+
+echo ""
+echo "--- Map render assertions ---"
+
+render_dir="$TEST_WS/renders"
+mkdir -p "$render_dir"
+
+# Copy JSONL log into the container and render maps
+docker cp "$TEST_WS/play.log" "$ctr_name:/tmp/play.log"
+if docker exec "$ctr_name" \
+    python3 /perfid/render_game.py /tmp/play.log --output-dir /tmp/renders \
+    >/dev/null 2>"$TEST_WS/render.err"; then
+    ok "render_game.py exits cleanly"
+    docker cp "$ctr_name:/tmp/renders/." "$render_dir/"
+else
+    ko "render_game.py failed (exit $?)"
+    cat "$TEST_WS/render.err" >&2
+fi
+
+# At least 2 PNGs (Spring + Fall adjudications)
+png_count=$(find "$render_dir" -name "*.png" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$png_count" -ge 2 ]]; then
+    ok "rendered $png_count phase maps (>=2)"
+else
+    ko "rendered $png_count phase maps (expected >=2)"
+fi
+
+if ls "$render_dir"/*1901-Spring* >/dev/null 2>&1; then
+    ok "Spring 1901 map exists"
+else
+    ko "Spring 1901 map missing"
+fi
+
+if ls "$render_dir"/*1901-Fall* >/dev/null 2>&1; then
+    ok "Fall 1901 map exists"
+else
+    ko "Fall 1901 map missing"
+fi
+
+# PNGs are valid (non-empty)
+first_png=$(find "$render_dir" -name "*.png" | head -1)
+if [[ -n "$first_png" ]] && [[ $(wc -c < "$first_png") -gt 1000 ]]; then
+    ok "rendered PNGs are non-trivial size"
+else
+    ko "rendered PNGs are empty or too small"
+fi
+
+# No warnings in stderr (unknown provinces)
+if [[ ! -s "$TEST_WS/render.err" ]]; then
+    ok "render produced no warnings"
+else
+    ko "render produced warnings: $(cat "$TEST_WS/render.err")"
 fi
 
 echo ""

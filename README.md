@@ -54,12 +54,12 @@ make status GAME=myid     # Print current standings
 make destroy GAME=myid    # Tear down volumes
 ```
 
-## Post-game analysis
+## Game log
 
-Agent output is encrypted with the GM key and logged as JSONL. To decrypt:
+All game events are emitted as plaintext JSONL to stdout. Pipe to a file for persistence:
 
 ```bash
-python3 decrypt_log.py --gm-key perfid-games/myid/gm-gpg/ perfid-games/myid/log.jsonl > decrypted.jsonl
+perfid play GAME 2>err.log | tee game.jsonl
 ```
 
 ## Development

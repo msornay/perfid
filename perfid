@@ -20,10 +20,9 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 
-from game_loop import PerfidError  # noqa: E402
+from game_loop import PerfidError, emit  # noqa: E402
 from game_state import POWERS, new_game, load_state, format_status  # noqa: E402
 from gpg import generate_player_key  # noqa: E402
-from logger import GameLogger  # noqa: E402
 from message_router import init_message_dirs  # noqa: E402
 
 
@@ -91,9 +90,7 @@ def cmd_new(args):
         print(f"  Generating keys for {power}...")
         generate_player_key(gd, power, gm_gpg)
 
-    # Log game creation
-    logger = GameLogger(gd)
-    logger.game_created(game_id, POWERS)
+    emit("game_created", game_id=game_id, powers=POWERS)
 
     print(f"Game '{game_id}' created at {gd}")
     print(f"Keys stored in {gd}/keys/ and {gd}/pubkeys/")

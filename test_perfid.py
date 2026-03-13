@@ -216,22 +216,24 @@ class TestNewCommand:
         assert state["eliminated"] == []
         assert len(state["units"]) == 7
 
-    def test_creates_log_file(self, tmp_path):
+    def test_emits_game_created_to_stdout(self, tmp_path):
         games_dir = str(tmp_path / "games")
-        run_perfid(
+        rc, out, err = run_perfid(
             "new", "test-001",
             env_override={"PERFID_GAMES_DIR": games_dir},
         )
-        log_path = os.path.join(
-            games_dir, "test-001", "log.jsonl"
-        )
-        assert os.path.isfile(log_path)
-        with open(log_path) as f:
-            events = [json.loads(l) for l in f if l.strip()]
-        created = [
-            e for e in events if e["event"] == "game_created"
-        ]
-        assert len(created) == 1
+        assert rc == 0, f"stderr: {err}"
+        # game_created event should be in stdout JSONL
+        found = False
+        for line in out.splitlines():
+            try:
+                e = json.loads(line)
+                if e.get("event") == "game_created":
+                    found = True
+                    break
+            except json.JSONDecodeError:
+                pass
+        assert found, "game_created event not found in stdout"
 
 
 # --- Status command ---

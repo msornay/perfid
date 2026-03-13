@@ -16,8 +16,16 @@ Usage:
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+_event_callback = None
+
+
+def set_event_callback(callback):
+    global _event_callback
+    _event_callback = callback
 
 # jDip directory relative to this file
 _JDIP_DIR = Path(__file__).parent / "jdip"
@@ -57,6 +65,9 @@ def _run_jdip(command, stdin_data=None):
     Raises:
         RuntimeError: If jDip exits with non-zero status.
     """
+    if _event_callback:
+        _event_callback("jdip_call", command=command, stdin=stdin_data)
+
     cmd = [
         "java",
         "-Djava.awt.headless=true",
@@ -65,6 +76,7 @@ def _run_jdip(command, stdin_data=None):
         command,
     ]
 
+    t0 = time.monotonic()
     result = subprocess.run(
         cmd,
         input=stdin_data,
@@ -73,6 +85,13 @@ def _run_jdip(command, stdin_data=None):
         cwd=str(_JDIP_DIR),
         timeout=30,
     )
+    duration_ms = int((time.monotonic() - t0) * 1000)
+
+    if _event_callback:
+        _event_callback("jdip_result", command=command,
+                        stdout=result.stdout, stderr=result.stderr,
+                        exit_code=result.returncode,
+                        duration_ms=duration_ms)
 
     if result.returncode != 0:
         raise RuntimeError(
@@ -285,8 +304,8 @@ def simulate(state, orders):
         }
     result["summary"] = summary
 
-    # Log to sidecar file if PERFID_SIM_LOG is set
-    sim_log = os.environ.get("PERFID_SIM_LOG")
+    # Log to sidecar file for the orchestrator to collect
+    sim_log = os.environ.get("PERFID_SIM_LOG", "/tmp/perfid-simulations.jsonl")
     if sim_log:
         record = json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(),

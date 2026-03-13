@@ -4,9 +4,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gnupg default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir pytest ruff
+RUN pip install --no-cache-dir pytest ruff Pillow
 
 WORKDIR /app
 COPY . .
 
-CMD ["python3", "-m", "pytest", "-v", "test_gpg.py", "test_logger.py", "test_game_state.py", "test_message_router.py", "test_orders.py", "test_prompt.py", "test_jdip_adapter.py", "test_game_loop.py", "test_decrypt_log.py", "test_perfid.py"]
+CMD ["python3", "-m", "pytest", "-v", "test_gpg.py", "test_game_state.py", "test_message_router.py", "test_orders.py", "test_prompt.py", "test_jdip_adapter.py", "test_game_loop.py", "test_perfid.py"]
