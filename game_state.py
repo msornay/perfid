@@ -117,7 +117,7 @@ ALL_SUPPLY_CENTERS = sorted(
 WIN_THRESHOLD = 18  # SCs needed to win
 
 
-def new_game(game_id, game_dir, use_jdip=True):
+def new_game(game_id, game_dir, use_jdip=True, profile="minimal"):
     """Create a new game with standard starting positions.
 
     When use_jdip is True (default), starting positions and supply
@@ -127,6 +127,7 @@ def new_game(game_id, game_dir, use_jdip=True):
     Args:
         game_id: Unique identifier for this game.
         game_dir: Path to the game directory (perfid-games/<game-id>/).
+        profile: Profile name for all powers (default "minimal").
         use_jdip: If True, get starting state from jDip.
 
     Returns:
@@ -174,6 +175,7 @@ def new_game(game_id, game_dir, use_jdip=True):
     }
 
     save_state(state, game_dir)
+    save_profiles({p: profile for p in POWERS}, game_dir)
     return state
 
 
@@ -528,6 +530,28 @@ def format_status(state):
 
     lines.append(f"\nTotal SCs owned: {sum(counts.values())}/34")
     return "\n".join(lines)
+
+
+def load_profiles(game_dir):
+    """Load profiles.json from game directory.
+
+    Returns a dict mapping power name to profile name
+    (e.g. {"France": "minimal", "England": "informed"}).
+    """
+    game_dir = Path(game_dir)
+    path = game_dir / "profiles.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {}
+
+
+def save_profiles(profiles, game_dir):
+    """Save profiles dict to profiles.json."""
+    game_dir = Path(game_dir)
+    path = game_dir / "profiles.json"
+    path.write_text(
+        json.dumps(profiles, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def load_sessions(game_dir):

@@ -11,6 +11,7 @@ from game_state import (
 )
 from message_router import init_message_dirs, send_message
 from prompt import (
+    PROFILES,
     adjustment_prompt,
     retreat_prompt,
     season_turn_prompt,
@@ -51,7 +52,7 @@ class TestSystemPrompt:
         assert "18" in sp
 
     def test_emphasizes_solo_victory(self):
-        sp = system_prompt("France")
+        sp = system_prompt("France", profile="informed")
         sp_lower = sp.lower()
         assert "solo victory" in sp_lower
         assert "win" in sp_lower
@@ -96,7 +97,7 @@ class TestSystemPrompt:
         assert "Winter Adjustment" in sp
 
     def test_describes_free_form_turns(self):
-        sp = system_prompt("France")
+        sp = system_prompt("France", profile="informed")
         sp_lower = sp.lower()
         assert "free-form" in sp_lower
         assert "submit" in sp_lower
@@ -410,6 +411,58 @@ class TestTurnContext:
         init_message_dirs(game_dir, POWERS)
         tc = turn_context("England", state, game_dir, round_num=1)
         assert "cannot submit" in tc.lower()
+
+
+class TestProfiles:
+    def test_profiles_dict_has_minimal_and_informed(self):
+        assert "minimal" in PROFILES
+        assert "informed" in PROFILES
+
+    def test_system_prompt_default_is_minimal(self):
+        sp_default = system_prompt("France")
+        sp_minimal = system_prompt("France", profile="minimal")
+        assert sp_default == sp_minimal
+
+    def test_system_prompt_with_minimal(self):
+        sp = system_prompt("England", profile="minimal")
+        assert "England" in sp
+        assert "Strategic Principles" not in sp
+
+    def test_system_prompt_with_informed(self):
+        sp = system_prompt("France", profile="informed")
+        assert "France" in sp
+        assert "Strategic Principles" in sp
+
+    def test_informed_has_research_data(self):
+        sp = system_prompt("Germany", profile="informed")
+        # Contains actual statistical data
+        assert "Solo Win Rates" in sp or "solo win" in sp.lower()
+        assert "10.3%" in sp  # France's win rate
+        assert "1901" in sp
+
+    def test_minimal_still_has_rules_and_gpg(self):
+        sp = system_prompt("Italy", profile="minimal")
+        assert "Diplomacy" in sp
+        assert "gpg" in sp.lower()
+        assert "encrypt" in sp.lower()
+        assert "18" in sp  # victory condition
+
+    def test_both_profiles_have_identity(self):
+        for profile in PROFILES:
+            sp = system_prompt("Turkey", profile=profile)
+            assert "Turkey" in sp
+            assert "turkey@perfid.local" in sp
+            assert "Ankara" in sp
+
+    def test_invalid_profile_raises(self):
+        with pytest.raises(ValueError):
+            system_prompt("France", profile="nonexistent")
+
+    def test_minimal_and_informed_are_different(self):
+        sp_min = system_prompt("France", profile="minimal")
+        sp_inf = system_prompt("France", profile="informed")
+        assert sp_min != sp_inf
+        assert len(sp_inf) > len(sp_min)
 
 
 class TestEdgeCases:

@@ -28,6 +28,7 @@ from game_state import (
     apply_adjustments,
     apply_retreats,
     format_status,
+    load_profiles,
     load_state,
     load_sessions,
     get_session_id,
@@ -429,7 +430,8 @@ def run_agent(ctx, power, prompt, env_extra=None):
     started = sessions.get(power, {}).get("started", False)
 
     if not started:
-        sys_prompt = system_prompt(power)
+        profile = ctx.get("profiles", {}).get(power, "minimal")
+        sys_prompt = system_prompt(power, profile=profile)
         cmd = [
             "sudo", "-u", "player",
             "env", *env_vars,
@@ -1032,11 +1034,14 @@ def run(game_id, games_dir, script_dir):
     import jdip_adapter
     jdip_adapter.set_event_callback(emit)
 
+    profiles = load_profiles(game_dir)
+
     ctx = {
         "game_id": game_id,
         "game_dir": game_dir,
         "gm_gnupghome": gm_gnupghome,
         "script_dir": script_dir,
+        "profiles": profiles,
     }
 
     emit("game_start", game_id=game_id)

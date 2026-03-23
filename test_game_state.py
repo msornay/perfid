@@ -20,11 +20,13 @@ from game_state import (
     format_status,
     get_phase,
     get_session_id,
+    load_profiles,
     load_sessions,
     load_state,
     mark_session_started,
     new_game,
     next_phase,
+    save_profiles,
     save_sessions,
     save_state,
     sc_counts,
@@ -506,6 +508,41 @@ class TestStartingPositions:
     def test_total_starting_units(self):
         total = sum(len(u) for u in STARTING_UNITS.values())
         assert total == 22  # 3*6 + 4 (Russia)
+
+
+class TestProfiles:
+    def test_new_game_creates_profiles_json(self, game_dir):
+        new_game("test-profiles", game_dir)
+        assert (game_dir / "profiles.json").exists()
+
+    def test_profiles_json_default_all_minimal(self, game_dir):
+        new_game("test-profiles", game_dir)
+        profiles = load_profiles(game_dir)
+        for power in POWERS:
+            assert profiles[power] == "minimal"
+
+    def test_load_profiles(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        (game_dir / "profiles.json").write_text(
+            json.dumps({"France": "informed", "England": "minimal"})
+        )
+        profiles = load_profiles(game_dir)
+        assert profiles["France"] == "informed"
+        assert profiles["England"] == "minimal"
+
+    def test_new_game_with_profile_param(self, tmp_path):
+        gd = tmp_path / "prof-game"
+        new_game("prof-test", gd, profile="informed")
+        profiles = load_profiles(gd)
+        for power in POWERS:
+            assert profiles[power] == "informed"
+
+    def test_save_profiles_round_trip(self, game_dir):
+        game_dir.mkdir(parents=True, exist_ok=True)
+        profiles = {p: "informed" for p in POWERS}
+        save_profiles(profiles, game_dir)
+        loaded = load_profiles(game_dir)
+        assert loaded == profiles
 
 
 class TestSessions:

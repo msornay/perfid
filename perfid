@@ -22,6 +22,7 @@ if SCRIPT_DIR not in sys.path:
 
 from game_loop import PerfidError, emit  # noqa: E402
 from game_state import POWERS, new_game, load_state, format_status  # noqa: E402
+from prompt import PROFILES  # noqa: E402
 from gpg import generate_player_key  # noqa: E402
 from message_router import init_message_dirs  # noqa: E402
 
@@ -64,7 +65,7 @@ def cmd_new(args):
     print(f"Creating game '{game_id}'...")
 
     # Initialize game state and message directories
-    state = new_game(game_id, gd)
+    state = new_game(game_id, gd, profile=args.profile)
     init_message_dirs(gd, state["units"].keys())
     print(f"Game state initialized: {state['year']} {state['phase']}")
 
@@ -127,6 +128,11 @@ def main():
         help="Create game, GM keys, and player keys",
     )
     new_p.add_argument("game_id", help="Unique game identifier")
+    new_p.add_argument(
+        "--profile", default="minimal",
+        choices=sorted(PROFILES),
+        help="Agent profile for all powers (default: minimal)",
+    )
 
     play_p = subparsers.add_parser(
         "play",

@@ -216,6 +216,44 @@ class TestNewCommand:
         assert state["eliminated"] == []
         assert len(state["units"]) == 7
 
+    def test_new_default_profile_is_minimal(self, tmp_path):
+        """profiles.json defaults to minimal for all powers."""
+        games_dir = str(tmp_path / "g")
+        rc, out, err = run_perfid(
+            "new", "t1",
+            env_override={"PERFID_GAMES_DIR": games_dir},
+        )
+        assert rc == 0, f"stderr: {err}"
+        prof_path = os.path.join(
+            games_dir, "t1", "profiles.json"
+        )
+        with open(prof_path) as f:
+            profiles = json.load(f)
+        for power in [
+            "Austria", "England", "France", "Germany",
+            "Italy", "Russia", "Turkey",
+        ]:
+            assert profiles[power] == "minimal"
+
+    def test_new_with_profile_flag(self, tmp_path):
+        """--profile informed sets all powers to informed."""
+        games_dir = str(tmp_path / "g")
+        rc, out, err = run_perfid(
+            "new", "t2", "--profile", "informed",
+            env_override={"PERFID_GAMES_DIR": games_dir},
+        )
+        assert rc == 0, f"stderr: {err}"
+        prof_path = os.path.join(
+            games_dir, "t2", "profiles.json"
+        )
+        with open(prof_path) as f:
+            profiles = json.load(f)
+        for power in [
+            "Austria", "England", "France", "Germany",
+            "Italy", "Russia", "Turkey",
+        ]:
+            assert profiles[power] == "informed"
+
     def test_emits_game_created_to_stdout(self, tmp_path):
         games_dir = str(tmp_path / "games")
         rc, out, err = run_perfid(
